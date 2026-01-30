@@ -63,16 +63,6 @@ end
 
 You will need [Rust](https://www.rust-lang.org/tools/install) for compilation to succeed.
 
-### Precompiled NIFs
-
-If you are packaging Ortex with a precompiled NIF, set `ORTEX_SKIP_COMPILE=1` during
-compilation to avoid building the Rust crate. Ensure the NIF (and any required
-`libonnxruntime` binaries) are available in `priv/native` for the target platform.
-
-```sh
-ORTEX_SKIP_COMPILE=1 mix compile
-```
-
 ## Execution provider features
 
 Ortex relies on `ort` cargo features to compile support for non-CPU execution providers.
@@ -89,3 +79,31 @@ ORTEX_FEATURES=cuda,tensorrt mix compile
 ```
 
 Enabling GPU providers requires the relevant system toolchains to be installed.
+
+### Packaging and Offline Builds
+
+If you are packaging Ortex with a precompiled NIF, set `ORTEX_SKIP_COMPILE=1` during
+compilation to avoid building the Rust crate. Ensure the NIF (and any required
+`libonnxruntime` binaries) are available in `priv/native` for the target platform.
+
+```sh
+ORTEX_SKIP_COMPILE=1 mix compile
+```
+
+For offline or system-provided ONNX Runtime builds, you can disable downloads and
+link dynamically using a local runtime install:
+
+```sh
+ORTEX_SKIP_DOWNLOAD=1 \
+ORT_PREFER_DYNAMIC_LINK=1 \
+ORT_LIB_LOCATION=/path/to/onnxruntime/lib \
+mix compile
+```
+
+If your package provides `libonnxruntime.pc`, enable pkg-config lookup:
+
+```sh
+ORTEX_FEATURES=pkg-config \
+PKG_CONFIG_PATH=/path/to/onnxruntime/lib/pkgconfig \
+mix compile
+```
