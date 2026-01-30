@@ -65,7 +65,10 @@ defmodule Ortex.Backend do
 
   defp to_binary(%T{data: %{ref: tensor}}) do
     # filling the bits and limits with 0 since we aren't using them right now
-    Ortex.Native.to_binary(tensor, 0, 0)
+    case Ortex.Native.to_binary(tensor, 0, 0) do
+      {:error, msg} -> raise msg
+      res -> res
+    end
   end
 
   @impl true
@@ -80,14 +83,19 @@ defmodule Ortex.Backend do
 
   @impl true
   def slice(out, %T{data: %B{ref: tensor_ref}}, start_indicies, lengths, strides) do
-    r = Ortex.Native.slice(tensor_ref, start_indicies, lengths, strides)
-    put_in(out.data, %B{ref: r})
+    case Ortex.Native.slice(tensor_ref, start_indicies, lengths, strides) do
+      {:error, msg} -> raise msg
+      res -> put_in(out.data, %B{ref: res})
+    end
   end
 
   @impl true
   def reshape(out, %T{data: %B{ref: ref}}) do
     shape = Nx.shape(out) |> Tuple.to_list()
-    put_in(out.data, %B{ref: Ortex.Native.reshape(ref, shape)})
+    case Ortex.Native.reshape(ref, shape) do
+      {:error, msg} -> raise msg
+      res -> put_in(out.data, %B{ref: res})
+    end
   end
 
   @impl true
@@ -102,7 +110,14 @@ defmodule Ortex.Backend do
         out
         | shape: new_shape,
           names: new_names,
-          data: %B{ref: Ortex.Native.reshape(ref, new_shape |> Tuple.to_list())}
+          data:
+            %B{
+              ref:
+                case Ortex.Native.reshape(ref, new_shape |> Tuple.to_list()) do
+                  {:error, msg} -> raise msg
+                  res -> res
+                end
+            }
       }
     end
   end
@@ -121,7 +136,10 @@ defmodule Ortex.Backend do
 
     type = out.type
 
-    %{out | data: %B{ref: Ortex.Native.concatenate(tensor_refs, type, axis)}}
+    case Ortex.Native.concatenate(tensor_refs, type, axis) do
+      {:error, msg} -> raise msg
+      res -> %{out | data: %B{ref: res}}
+    end
   end
 
   if Application.compile_env(:ortex, :add_backend_on_inspect, true) do

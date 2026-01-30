@@ -87,6 +87,15 @@ pub fn run(
     // Grab the session and run a forward pass with it
     let session: &ort::Session = &model.session;
 
+    let expected_inputs = session.inputs.len();
+    if inputs.len() != expected_inputs {
+        return Err(Error::new(format!(
+            "Expected {} input(s), got {}",
+            expected_inputs,
+            inputs.len()
+        )));
+    }
+
     let mut ortified_inputs: Vec<ort::SessionInputValue> = Vec::new();
 
     for (elixir_input, onnx_input) in zip(inputs, &session.inputs) {
@@ -94,8 +103,8 @@ pub fn run(
         if is_bool_input(&onnx_input.input_type) {
             // this assumes that the boolean input isn't huge -- we're cloning it twice;
             // once below, once in the try_into()
-            let boolified_input: &OrtexTensor = &derefed_input.clone().to_bool();
-            let v: ort::SessionInputValue = boolified_input.try_into()?;
+            let boolified_input = derefed_input.clone().to_bool()?;
+            let v: ort::SessionInputValue = (&boolified_input).try_into()?;
             ortified_inputs.push(v);
         } else {
             let v: ort::SessionInputValue = derefed_input.try_into()?;
@@ -109,12 +118,12 @@ pub fn run(
 
     for output_descriptor in &session.outputs {
         let output_name: &str = &output_descriptor.name;
-        let val = outputs.get(output_name).expect(
-            &format!(
+        let val = outputs.get(output_name).ok_or_else(|| {
+            Error::new(format!(
                 "Expected {} to be in the outputs, but didn't find it",
                 output_name
-            )[..],
-        );
+            ))
+        })?;
 
         // NOTE: try_into impl here will implicitly map bool outputs to u8 outputs
         let ortextensor: OrtexTensor = val.try_into()?;

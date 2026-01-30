@@ -3,20 +3,54 @@
 
 use crate::constants::*;
 use crate::tensor::OrtexTensor;
-use ndarray::{ArrayViewMut, Ix, IxDyn};
-
-use ndarray::ShapeError;
+use ndarray::{Array, IxDyn};
 
 use rustler::resource::ResourceArc;
 use rustler::types::Binary;
-use rustler::{Atom, Env, NifResult};
+use rustler::{Atom, Env, Error as RustlerError, NifResult};
 
 use ort::{ExecutionProviderDispatch, GraphOptimizationLevel};
 
-/// A faster (unsafe) way of creating an Array from an Erlang binary
-fn initialize_from_raw_ptr<T>(ptr: *const T, shape: &[Ix]) -> ArrayViewMut<'_, T, IxDyn> {
-    let array = unsafe { ArrayViewMut::from_shape_ptr(shape, ptr as *mut T) };
-    array
+fn element_count(shape: &[usize]) -> Result<usize, String> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, dim| {
+            acc.checked_mul(*dim)
+                .ok_or_else(|| "Tensor shape is too large to index".to_string())
+        })
+}
+
+fn array_from_binary<T: Copy + Default>(
+    bin: &Binary,
+    shape: &[usize],
+) -> Result<Array<T, IxDyn>, String> {
+    let elements = element_count(shape)?;
+    let elem_size = std::mem::size_of::<T>();
+    let expected_bytes = elements
+        .checked_mul(elem_size)
+        .ok_or_else(|| "Tensor binary size overflows usize".to_string())?;
+
+    if bin.len() < expected_bytes {
+        return Err(format!(
+            "Binary is too small for shape {:?}: expected {} bytes, got {}",
+            shape,
+            expected_bytes,
+            bin.len()
+        ));
+    }
+
+    let mut data = vec![T::default(); elements];
+    if expected_bytes > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bin.as_ptr(),
+                data.as_mut_ptr() as *mut u8,
+                expected_bytes,
+            );
+        }
+    }
+
+    Array::from_shape_vec(IxDyn(shape), data).map_err(|e| e.to_string())
 }
 
 /// Given a Binary term, shape, and dtype from the BEAM, constructs an OrtexTensor and
@@ -37,45 +71,48 @@ pub fn from_binary(
     shape: Vec<usize>,
     dtype_str: String,
     dtype_bits: usize,
-) -> Result<ResourceArc<OrtexTensor>, ShapeError> {
+) -> Result<ResourceArc<OrtexTensor>, String> {
     match (dtype_str.as_ref(), dtype_bits) {
         ("bf", 16) => Ok(ResourceArc::new(OrtexTensor::bf16(
-            initialize_from_raw_ptr(bin.as_ptr() as *const half::bf16, &shape).to_owned(),
+            array_from_binary::<half::bf16>(&bin, &shape)?,
         ))),
         ("f", 16) => Ok(ResourceArc::new(OrtexTensor::f16(
-            initialize_from_raw_ptr(bin.as_ptr() as *const half::f16, &shape).to_owned(),
+            array_from_binary::<half::f16>(&bin, &shape)?,
         ))),
-        ("f", 32) => Ok(ResourceArc::new(OrtexTensor::f32(
-            initialize_from_raw_ptr(bin.as_ptr() as *const f32, &shape).to_owned(),
-        ))),
-        ("f", 64) => Ok(ResourceArc::new(OrtexTensor::f64(
-            initialize_from_raw_ptr(bin.as_ptr() as *const f64, &shape).to_owned(),
-        ))),
-        ("s", 8) => Ok(ResourceArc::new(OrtexTensor::s8(
-            initialize_from_raw_ptr(bin.as_ptr() as *const i8, &shape).to_owned(),
-        ))),
-        ("s", 16) => Ok(ResourceArc::new(OrtexTensor::s16(
-            initialize_from_raw_ptr(bin.as_ptr() as *const i16, &shape).to_owned(),
-        ))),
-        ("s", 32) => Ok(ResourceArc::new(OrtexTensor::s32(
-            initialize_from_raw_ptr(bin.as_ptr() as *const i32, &shape).to_owned(),
-        ))),
-        ("s", 64) => Ok(ResourceArc::new(OrtexTensor::s64(
-            initialize_from_raw_ptr(bin.as_ptr() as *const i64, &shape).to_owned(),
-        ))),
-        ("u", 8) => Ok(ResourceArc::new(OrtexTensor::u8(
-            initialize_from_raw_ptr(bin.as_ptr() as *const u8, &shape).to_owned(),
-        ))),
-        ("u", 16) => Ok(ResourceArc::new(OrtexTensor::u16(
-            initialize_from_raw_ptr(bin.as_ptr() as *const u16, &shape).to_owned(),
-        ))),
-        ("u", 32) => Ok(ResourceArc::new(OrtexTensor::u32(
-            initialize_from_raw_ptr(bin.as_ptr() as *const u32, &shape).to_owned(),
-        ))),
-        ("u", 64) => Ok(ResourceArc::new(OrtexTensor::u64(
-            initialize_from_raw_ptr(bin.as_ptr() as *const u64, &shape).to_owned(),
-        ))),
-        (&_, _) => unimplemented!(),
+        ("f", 32) => Ok(ResourceArc::new(OrtexTensor::f32(array_from_binary::<f32>(
+            &bin, &shape,
+        )?))),
+        ("f", 64) => Ok(ResourceArc::new(OrtexTensor::f64(array_from_binary::<f64>(
+            &bin, &shape,
+        )?))),
+        ("s", 8) => Ok(ResourceArc::new(OrtexTensor::s8(array_from_binary::<i8>(
+            &bin, &shape,
+        )?))),
+        ("s", 16) => Ok(ResourceArc::new(OrtexTensor::s16(array_from_binary::<i16>(
+            &bin, &shape,
+        )?))),
+        ("s", 32) => Ok(ResourceArc::new(OrtexTensor::s32(array_from_binary::<i32>(
+            &bin, &shape,
+        )?))),
+        ("s", 64) => Ok(ResourceArc::new(OrtexTensor::s64(array_from_binary::<i64>(
+            &bin, &shape,
+        )?))),
+        ("u", 8) => Ok(ResourceArc::new(OrtexTensor::u8(array_from_binary::<u8>(
+            &bin, &shape,
+        )?))),
+        ("u", 16) => Ok(ResourceArc::new(OrtexTensor::u16(array_from_binary::<u16>(
+            &bin, &shape,
+        )?))),
+        ("u", 32) => Ok(ResourceArc::new(OrtexTensor::u32(array_from_binary::<u32>(
+            &bin, &shape,
+        )?))),
+        ("u", 64) => Ok(ResourceArc::new(OrtexTensor::u64(array_from_binary::<u64>(
+            &bin, &shape,
+        )?))),
+        (&_, _) => Err(format!(
+            "Unsupported dtype {} with {} bits",
+            dtype_str, dtype_bits
+        )),
     }
 }
 
@@ -84,25 +121,54 @@ pub fn from_binary(
 pub fn to_binary<'a>(
     env: Env<'a>,
     reference: ResourceArc<OrtexTensor>,
-    _bits: usize,
-    _limit: usize,
+    bits: usize,
+    limit: usize,
 ) -> NifResult<Binary<'a>> {
-    Ok(reference.make_binary(env, |x| x.to_bytes()))
+    if bits == 0 || limit == 0 {
+        return Ok(reference.make_binary(env, |x| x.to_bytes()));
+    }
+
+    if bits % 8 != 0 {
+        return Err(RustlerError::Term(Box::new(format!(
+            "Invalid element bit size: {}",
+            bits
+        ))));
+    }
+
+    let elem_size = bits / 8;
+    let elem_count = element_count(&reference.shape())
+        .map_err(|e| RustlerError::Term(Box::new(e)))?;
+    let capped = std::cmp::min(limit, elem_count);
+    let byte_limit = capped
+        .checked_mul(elem_size)
+        .ok_or_else(|| RustlerError::Term(Box::new("Binary size overflows usize".to_string())))?;
+
+    Ok(reference.make_binary(env, |x| {
+        let bytes = x.to_bytes();
+        let len = std::cmp::min(byte_limit, bytes.len());
+        &bytes[..len]
+    }))
 }
 
 /// Takes a vec of Atoms and transforms them into a vec of ExecutionProvider Enums
 pub fn map_eps(env: rustler::env::Env, eps: Vec<Atom>) -> Vec<ExecutionProviderDispatch> {
     eps.iter()
-        .map(|e| match &e.to_term(env).atom_to_string().unwrap()[..] {
-            CPU => ort::CPUExecutionProvider::default().build(),
-            CUDA => ort::CUDAExecutionProvider::default().build(),
-            TENSORRT => ort::TensorRTExecutionProvider::default().build(),
-            ACL => ort::ACLExecutionProvider::default().build(),
-            ONEDNN => ort::OneDNNExecutionProvider::default().build(),
-            COREML => ort::CoreMLExecutionProvider::default().build(),
-            DIRECTML => ort::DirectMLExecutionProvider::default().build(),
-            ROCM => ort::ROCmExecutionProvider::default().build(),
-            _ => ort::CPUExecutionProvider::default().build(),
+        .map(|e| {
+            let atom_str = e
+                .to_term(env)
+                .atom_to_string()
+                .unwrap_or_else(|_| CPU.to_string());
+            match atom_str.as_str() {
+                CPU => ort::CPUExecutionProvider::default().build(),
+                CUDA => ort::CUDAExecutionProvider::default().build(),
+                TENSORRT => ort::TensorRTExecutionProvider::default().build(),
+                ACL => ort::ACLExecutionProvider::default().build(),
+                ONEDNN => ort::OneDNNExecutionProvider::default().build(),
+                COREML => ort::CoreMLExecutionProvider::default().build(),
+                DIRECTML => ort::DirectMLExecutionProvider::default().build(),
+                ROCM => ort::ROCmExecutionProvider::default().build(),
+                _ => ort::CPUExecutionProvider::default().build(),
+            }
         })
         .collect()
 }

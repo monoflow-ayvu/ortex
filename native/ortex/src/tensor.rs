@@ -4,7 +4,7 @@ use ndarray::prelude::*;
 use ndarray::{ArrayBase, ArrayView, Data, IxDyn, IxDynImpl, ViewRepr};
 use ort::{DynValue, Error, Value};
 use rustler::resource::ResourceArc;
-use rustler::Atom;
+use rustler::{Atom, Error as RustlerError};
 use std::convert::TryInto;
 
 use crate::constants::ortex_atoms;
@@ -27,7 +27,7 @@ pub enum OrtexTensor {
     f32(Array<f32, IxDyn>),
     f64(Array<f64, IxDyn>),
     // the bool input is for internal use only.
-    // Any Nx facing ops should panic if called on a bool input
+    // Nx-facing code treats bool tensors as u8 outputs.
     bool(Array<bool, IxDyn>),
 }
 
@@ -46,7 +46,7 @@ impl OrtexTensor {
             OrtexTensor::bf16(y) => y.shape().to_owned(),
             OrtexTensor::f32(y) => y.shape().to_owned(),
             OrtexTensor::f64(y) => y.shape().to_owned(),
-            _ => panic!("Can't convert this type to Nx format"),
+            OrtexTensor::bool(y) => y.shape().to_owned(),
         }
     }
 
@@ -112,7 +112,11 @@ impl OrtexTensor {
                     .into_shape_with_order(shape)
                     .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))?,
             )),
-            _ => panic!("Can't convert this type to Nx format"),
+            OrtexTensor::bool(y) => Ok(OrtexTensor::bool(
+                y.clone()
+                    .into_shape_with_order(shape)
+                    .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))?,
+            )),
         }
     }
 
@@ -130,7 +134,7 @@ impl OrtexTensor {
             OrtexTensor::bf16(_) => (ortex_atoms::bf(), 16),
             OrtexTensor::f32(_) => (ortex_atoms::f(), 32),
             OrtexTensor::f64(_) => (ortex_atoms::f(), 64),
-            _ => panic!("Can't convert this type to Nx format"),
+            OrtexTensor::bool(_) => (ortex_atoms::u(), 8),
         }
     }
 
@@ -148,7 +152,7 @@ impl OrtexTensor {
             OrtexTensor::bf16(y) => get_bytes(y),
             OrtexTensor::f32(y) => get_bytes(y),
             OrtexTensor::f64(y) => get_bytes(y),
-            _ => panic!("Can't convert this type to Nx format"),
+            OrtexTensor::bool(y) => get_bytes(y),
         };
         contents
     }
@@ -158,7 +162,36 @@ impl OrtexTensor {
         start_indicies: Vec<isize>,
         lengths: Vec<isize>,
         strides: Vec<isize>,
-    ) -> Self {
+    ) -> rustler::NifResult<Self> {
+        let rank = match self {
+            OrtexTensor::s8(y) => y.ndim(),
+            OrtexTensor::s16(y) => y.ndim(),
+            OrtexTensor::s32(y) => y.ndim(),
+            OrtexTensor::s64(y) => y.ndim(),
+            OrtexTensor::u8(y) => y.ndim(),
+            OrtexTensor::u16(y) => y.ndim(),
+            OrtexTensor::u32(y) => y.ndim(),
+            OrtexTensor::u64(y) => y.ndim(),
+            OrtexTensor::f16(y) => y.ndim(),
+            OrtexTensor::bf16(y) => y.ndim(),
+            OrtexTensor::f32(y) => y.ndim(),
+            OrtexTensor::f64(y) => y.ndim(),
+            OrtexTensor::bool(y) => y.ndim(),
+        };
+
+        if start_indicies.len() != rank || lengths.len() != rank || strides.len() != rank {
+            return Err(RustlerError::Term(Box::new(format!(
+                "Slice arguments must match tensor rank of {}",
+                rank
+            ))));
+        }
+
+        if strides.iter().any(|s| *s == 0) {
+            return Err(RustlerError::Term(Box::new(
+                "Slice stride must be non-zero".to_string(),
+            )));
+        }
+
         let mut slice_specs: Vec<(isize, Option<isize>, isize)> = vec![];
         for ((start_index, length), stride) in start_indicies
             .iter()
@@ -167,7 +200,7 @@ impl OrtexTensor {
         {
             slice_specs.push((*start_index, Some(*length + *start_index), *stride));
         }
-        match self {
+        let sliced = match self {
             OrtexTensor::s8(y) => OrtexTensor::s8(slice_array(y, &slice_specs).to_owned()),
             OrtexTensor::s16(y) => OrtexTensor::s16(slice_array(y, &slice_specs).to_owned()),
             OrtexTensor::s32(y) => OrtexTensor::s32(slice_array(y, &slice_specs).to_owned()),
@@ -180,25 +213,30 @@ impl OrtexTensor {
             OrtexTensor::bf16(y) => OrtexTensor::bf16(slice_array(y, &slice_specs).to_owned()),
             OrtexTensor::f32(y) => OrtexTensor::f32(slice_array(y, &slice_specs).to_owned()),
             OrtexTensor::f64(y) => OrtexTensor::f64(slice_array(y, &slice_specs).to_owned()),
-            _ => panic!("Can't convert this type to Nx format"),
-        }
+            OrtexTensor::bool(y) => OrtexTensor::bool(slice_array(y, &slice_specs).to_owned()),
+        };
+        Ok(sliced)
     }
 
-    pub fn to_bool(self) -> OrtexTensor {
+    pub fn to_bool(self) -> Result<OrtexTensor, Error> {
         match self {
             OrtexTensor::u8(y) => {
-                let bool_tensor = y.to_owned().mapv(|x| match x {
-                    0 => false,
-                    1 => true,
-                    _ => {
-                        panic!(
-                            "Tried to convert a u8 tensor to bool, but not every element is 0 or 1"
-                        )
-                    }
-                });
-                OrtexTensor::bool(bool_tensor)
+                let values: Result<Vec<bool>, Error> = y
+                    .iter()
+                    .map(|x| match x {
+                        0 => Ok(false),
+                        1 => Ok(true),
+                        _ => Err(Error::new(
+                            "Tried to convert a u8 tensor to bool, but not every element is 0 or 1",
+                        )),
+                    })
+                    .collect();
+
+                let bool_tensor =
+                    Array::from_shape_vec(y.raw_dim(), values?).map_err(|e| Error::new(e.to_string()))?;
+                Ok(OrtexTensor::bool(bool_tensor))
             }
-            t => panic!("Can't convert this type {:?} to bool", t.dtype()),
+            t => Err(Error::new(format!("Can't convert this type {:?} to bool", t.dtype()))),
         }
     }
 }
@@ -236,7 +274,7 @@ impl TryFrom<&Value> for OrtexTensor {
                 ty: t,
                 dimensions: _,
             } => t,
-            _ => panic!("can't decode non tensor, got {}", dtype),
+            _ => return Err(Error::new(format!("Expected tensor output, got {:?}", dtype))),
         };
 
         let tensor = match ty {
@@ -277,7 +315,7 @@ impl TryFrom<&Value> for OrtexTensor {
                 OrtexTensor::s64(e.try_extract_tensor::<i64>()?.into_owned())
             }
             ort::TensorElementType::String => {
-                todo!("Can't return string tensors")
+                return Err(Error::new("String tensors are not supported"))
             }
             // map the output into u8 space
             ort::TensorElementType::Bool => {
@@ -351,17 +389,25 @@ macro_rules! concatenate {
         }
         // hack way to type coalesce. Filters out any ndarray's that don't
         // have the desired type
+        let input_len = $tensors.len();
         let tensors: Vec<ArrayType> = $tensors
             .iter()
             .filter_map(|tensor| filter(tensor))
             .collect();
+        if tensors.len() != input_len {
+            return Err(Error::new(
+                "Concatenate called with mixed tensor types",
+            ));
+        }
 
-        let tensors = ndarray::concatenate(Axis($axis), &tensors).unwrap();
+        let tensors =
+            ndarray::concatenate(Axis($axis), &tensors).map_err(|e| Error::new(e.to_string()))?;
         // data is not contiguous after the concatenation above. To decode
         // properly, need to create a new contiguous vector
         let tensors =
-            Array::from_shape_vec(tensors.raw_dim(), tensors.iter().cloned().collect()).unwrap();
-        OrtexTensor::$ort_tensor_kind(tensors)
+            Array::from_shape_vec(tensors.raw_dim(), tensors.iter().cloned().collect())
+                .map_err(|e| Error::new(e.to_string()))?;
+        Ok(OrtexTensor::$ort_tensor_kind(tensors))
     }};
 }
 
@@ -369,7 +415,10 @@ pub fn concatenate(
     tensors: Vec<ResourceArc<OrtexTensor>>,
     dtype: (&str, usize),
     axis: usize,
-) -> OrtexTensor {
+) -> Result<OrtexTensor, Error> {
+    if tensors.is_empty() {
+        return Err(Error::new("Concatenate requires at least one tensor"));
+    }
     match dtype {
         ("s", 8) => concatenate!(tensors, axis, i8, s8),
         ("s", 16) => concatenate!(tensors, axis, i16, s16),
@@ -383,6 +432,9 @@ pub fn concatenate(
         ("bf", 16) => concatenate!(tensors, axis, half::bf16, bf16),
         ("f", 32) => concatenate!(tensors, axis, f32, f32),
         ("f", 64) => concatenate!(tensors, axis, f64, f64),
-        _ => unimplemented!(),
+        _ => Err(Error::new(format!(
+            "Unsupported dtype {} with {} bits for concatenate",
+            dtype.0, dtype.1
+        ))),
     }
 }

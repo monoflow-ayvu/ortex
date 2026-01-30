@@ -166,7 +166,7 @@ pub fn slice(
         start_indicies,
         lengths,
         strides,
-    )))
+    )?))
 }
 
 #[rustler::nif]
@@ -185,7 +185,8 @@ pub fn concatenate(
 ) -> NifResult<ResourceArc<OrtexTensor>> {
     let (dtype_t, dtype_bits): (Term, usize) = dtype.decode()?;
     let dtype_str = dtype_t.atom_to_string()?;
-    let concatted = tensor::concatenate(tensors, (&dtype_str, dtype_bits), axis as usize);
+    let concatted = tensor::concatenate(tensors, (&dtype_str, dtype_bits), axis as usize)
+        .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))?;
     Ok(ResourceArc::new(concatted))
 }
 
