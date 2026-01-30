@@ -36,9 +36,9 @@ fn array_from_binary<T: Copy + Default>(
         .checked_mul(elem_size)
         .ok_or_else(|| "Tensor binary size overflows usize".to_string())?;
 
-    if bin.len() < expected_bytes {
+    if bin.len() != expected_bytes {
         return Err(format!(
-            "Binary is too small for shape {:?}: expected {} bytes, got {}",
+            "Binary length mismatch for shape {:?}: expected {} bytes, got {}",
             shape,
             expected_bytes,
             bin.len()
@@ -157,23 +157,33 @@ pub fn to_binary<'a>(
 }
 
 /// Takes a vec of Atoms and transforms them into a vec of ExecutionProvider Enums
-pub fn map_eps(env: rustler::env::Env, eps: Vec<Atom>) -> Vec<ExecutionProviderDispatch> {
+pub fn map_eps(
+    env: rustler::env::Env,
+    eps: Vec<Atom>,
+) -> Result<Vec<ExecutionProviderDispatch>, String> {
     eps.iter()
         .map(|e| {
             let atom_str = e
                 .to_term(env)
                 .atom_to_string()
-                .unwrap_or_else(|_| CPU.to_string());
+                .map_err(|_| "Execution provider must be an atom".to_string())?;
             match atom_str.as_str() {
-                CPU => CPUExecutionProvider::default().build(),
-                CUDA => CUDAExecutionProvider::default().build(),
-                TENSORRT => TensorRTExecutionProvider::default().build(),
-                ACL => ACLExecutionProvider::default().build(),
-                ONEDNN => OneDNNExecutionProvider::default().build(),
-                COREML => CoreMLExecutionProvider::default().build(),
-                DIRECTML => DirectMLExecutionProvider::default().build(),
-                ROCM => ROCmExecutionProvider::default().build(),
-                _ => CPUExecutionProvider::default().build(),
+                CPU => Ok(CPUExecutionProvider::default().build()),
+                CUDA => Ok(CUDAExecutionProvider::default().build()),
+                TENSORRT => Ok(TensorRTExecutionProvider::default().build()),
+                ACL => Ok(ACLExecutionProvider::default().build()),
+                ONEDNN | "dnnl" => Ok(OneDNNExecutionProvider::default().build()),
+                COREML => Ok(CoreMLExecutionProvider::default().build()),
+                DIRECTML => Ok(DirectMLExecutionProvider::default().build()),
+                ROCM => Ok(ROCmExecutionProvider::default().build()),
+                _ => Err(format!(
+                    "Unknown execution provider: {}. Expected one of: {}",
+                    atom_str,
+                    vec![
+                        CPU, CUDA, TENSORRT, ACL, ONEDNN, "dnnl", COREML, DIRECTML, ROCM
+                    ]
+                    .join(", ")
+                )),
             }
         })
         .collect()

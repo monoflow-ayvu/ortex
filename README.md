@@ -62,3 +62,20 @@ end
 ```
 
 You will need [Rust](https://www.rust-lang.org/tools/install) for compilation to succeed.
+
+## Execution provider features
+
+Ortex relies on `ort` cargo features to compile support for non-CPU execution providers.
+Defaults are OS-specific:
+
+- macOS: `coreml`
+- Windows: `directml`
+- Linux: none (CPU-only)
+
+Override via `ORTEX_FEATURES` as a comma-separated list. For example:
+
+```sh
+ORTEX_FEATURES=cuda,tensorrt mix compile
+```
+
+Enabling GPU providers requires the relevant system toolchains to be installed.

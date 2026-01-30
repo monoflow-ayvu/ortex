@@ -60,23 +60,19 @@ defmodule Ortex.Backend do
 
   @impl true
   def backend_transfer(tensor, backend, opts) do
-    backend.from_binary(tensor, to_binary(tensor), opts)
-  end
-
-  defp to_binary(%T{data: %{ref: tensor}}) do
-    # filling the bits and limits with 0 since we aren't using them right now
-    case Ortex.Native.to_binary(tensor, 0, 0) do
-      {:error, msg} -> raise msg
-      res -> res
-    end
+    backend.from_binary(tensor, to_binary(tensor, 0), opts)
   end
 
   @impl true
   def inspect(%T{} = tensor, inspect_opts) do
-    limit = if inspect_opts.limit == :infinity, do: :infinity, else: inspect_opts.limit + 1
+    limit =
+      case inspect_opts.limit do
+        :infinity -> Nx.size(tensor)
+        value -> min(value + 1, Nx.size(tensor))
+      end
 
     tensor
-    |> to_binary(min(limit, Nx.size(tensor)))
+    |> to_binary(limit)
     |> then(&Nx.Backend.inspect(tensor, &1, inspect_opts))
     |> maybe_add_signature(tensor)
   end
