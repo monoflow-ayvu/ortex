@@ -2,9 +2,11 @@
 use core::convert::TryFrom;
 use ndarray::prelude::*;
 use ndarray::{ArrayBase, ArrayView, Data, IxDyn, IxDynImpl, ViewRepr};
-use ort::{DynValue, Error, Value};
+use ort::session::SessionInputValue;
+use ort::tensor::TensorElementType;
+use ort::value::{Tensor, Value, ValueType};
+use ort::Error;
 use rustler::{Atom, Error as RustlerError, Resource, ResourceArc};
-use std::convert::TryInto;
 
 use crate::constants::ortex_atoms;
 
@@ -270,59 +272,62 @@ where
 impl TryFrom<&Value> for OrtexTensor {
     type Error = Error;
     fn try_from(e: &Value) -> Result<Self, Self::Error> {
-        let dtype: ort::ValueType = e.dtype();
+        let dtype = e.dtype();
         let ty = match dtype {
-            ort::ValueType::Tensor {
-                ty: t,
-                dimensions: _,
-            } => t,
+            ValueType::Tensor { ty, .. } => ty,
             _ => return Err(Error::new(format!("Expected tensor output, got {:?}", dtype))),
         };
 
-        let tensor = match ty {
-            ort::TensorElementType::Bfloat16 => {
-                OrtexTensor::bf16(e.try_extract_tensor::<half::bf16>()?.into_owned())
+        let tensor = match *ty {
+            TensorElementType::Bfloat16 => {
+                OrtexTensor::bf16(e.try_extract_array::<half::bf16>()?.to_owned())
             }
-            ort::TensorElementType::Float16 => {
-                OrtexTensor::f16(e.try_extract_tensor::<half::f16>()?.into_owned())
+            TensorElementType::Float16 => {
+                OrtexTensor::f16(e.try_extract_array::<half::f16>()?.to_owned())
             }
-            ort::TensorElementType::Float32 => {
-                OrtexTensor::f32(e.try_extract_tensor::<f32>()?.into_owned())
+            TensorElementType::Float32 => {
+                OrtexTensor::f32(e.try_extract_array::<f32>()?.to_owned())
             }
-            ort::TensorElementType::Float64 => {
-                OrtexTensor::f64(e.try_extract_tensor::<f64>()?.into_owned())
+            TensorElementType::Float64 => {
+                OrtexTensor::f64(e.try_extract_array::<f64>()?.to_owned())
             }
-            ort::TensorElementType::Uint8 => {
-                OrtexTensor::u8(e.try_extract_tensor::<u8>()?.into_owned())
+            TensorElementType::Uint8 => {
+                OrtexTensor::u8(e.try_extract_array::<u8>()?.to_owned())
             }
-            ort::TensorElementType::Uint16 => {
-                OrtexTensor::u16(e.try_extract_tensor::<u16>()?.into_owned())
+            TensorElementType::Uint16 => {
+                OrtexTensor::u16(e.try_extract_array::<u16>()?.to_owned())
             }
-            ort::TensorElementType::Uint32 => {
-                OrtexTensor::u32(e.try_extract_tensor::<u32>()?.into_owned())
+            TensorElementType::Uint32 => {
+                OrtexTensor::u32(e.try_extract_array::<u32>()?.to_owned())
             }
-            ort::TensorElementType::Uint64 => {
-                OrtexTensor::u64(e.try_extract_tensor::<u64>()?.into_owned())
+            TensorElementType::Uint64 => {
+                OrtexTensor::u64(e.try_extract_array::<u64>()?.to_owned())
             }
-            ort::TensorElementType::Int8 => {
-                OrtexTensor::s8(e.try_extract_tensor::<i8>()?.into_owned())
+            TensorElementType::Int8 => {
+                OrtexTensor::s8(e.try_extract_array::<i8>()?.to_owned())
             }
-            ort::TensorElementType::Int16 => {
-                OrtexTensor::s16(e.try_extract_tensor::<i16>()?.into_owned())
+            TensorElementType::Int16 => {
+                OrtexTensor::s16(e.try_extract_array::<i16>()?.to_owned())
             }
-            ort::TensorElementType::Int32 => {
-                OrtexTensor::s32(e.try_extract_tensor::<i32>()?.into_owned())
+            TensorElementType::Int32 => {
+                OrtexTensor::s32(e.try_extract_array::<i32>()?.to_owned())
             }
-            ort::TensorElementType::Int64 => {
-                OrtexTensor::s64(e.try_extract_tensor::<i64>()?.into_owned())
+            TensorElementType::Int64 => {
+                OrtexTensor::s64(e.try_extract_array::<i64>()?.to_owned())
             }
-            ort::TensorElementType::String => {
+            TensorElementType::String => {
                 return Err(Error::new("String tensors are not supported"))
             }
             // map the output into u8 space
-            ort::TensorElementType::Bool => {
-                let nd_array = e.try_extract_tensor::<bool>()?.into_owned();
+            TensorElementType::Bool => {
+                let nd_array = e.try_extract_array::<bool>()?;
                 OrtexTensor::u8(nd_array.mapv(|x| x as u8))
+            }
+            other => {
+                return Err(Error::new(format!(
+                    "Tensor element type {:?} is not supported",
+                    other
+                )))
             }
         };
 
@@ -330,25 +335,25 @@ impl TryFrom<&Value> for OrtexTensor {
     }
 }
 
-impl TryFrom<&OrtexTensor> for ort::SessionInputValue<'_> {
+impl TryFrom<&OrtexTensor> for SessionInputValue<'_> {
     type Error = Error;
     fn try_from(ort_tensor: &OrtexTensor) -> Result<Self, Self::Error> {
-        let r: DynValue = match ort_tensor {
-            OrtexTensor::s8(arr) => arr.to_owned().try_into()?,
-            OrtexTensor::s16(arr) => arr.clone().try_into()?,
-            OrtexTensor::s32(arr) => arr.clone().try_into()?,
-            OrtexTensor::s64(arr) => arr.clone().try_into()?,
-            OrtexTensor::f16(arr) => arr.clone().try_into()?,
-            OrtexTensor::f32(arr) => arr.clone().try_into()?,
-            OrtexTensor::f64(arr) => arr.clone().try_into()?,
-            OrtexTensor::bf16(arr) => arr.clone().try_into()?,
-            OrtexTensor::u8(arr) => arr.clone().try_into()?,
-            OrtexTensor::u16(arr) => arr.clone().try_into()?,
-            OrtexTensor::u32(arr) => arr.clone().try_into()?,
-            OrtexTensor::u64(arr) => arr.clone().try_into()?,
-            OrtexTensor::bool(arr) => arr.clone().try_into()?,
+        let r: SessionInputValue = match ort_tensor {
+            OrtexTensor::s8(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::s16(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::s32(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::s64(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::f16(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::f32(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::f64(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::bf16(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::u8(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::u16(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::u32(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::u64(arr) => Tensor::from_array(arr.to_owned())?.into(),
+            OrtexTensor::bool(arr) => Tensor::from_array(arr.to_owned())?.into(),
         };
-        Ok(r.into())
+        Ok(r)
     }
 }
 

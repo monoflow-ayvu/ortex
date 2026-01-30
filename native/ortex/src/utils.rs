@@ -8,7 +8,14 @@ use ndarray::{Array, IxDyn};
 use rustler::types::Binary;
 use rustler::{Atom, Env, Error as RustlerError, NifResult, ResourceArc};
 
-use ort::{ExecutionProviderDispatch, GraphOptimizationLevel};
+use ort::execution_providers::{
+    ACLExecutionProvider, CPUExecutionProvider, CUDAExecutionProvider, CoreMLExecutionProvider,
+    DirectMLExecutionProvider, ExecutionProviderDispatch, OneDNNExecutionProvider,
+    ROCmExecutionProvider, TensorRTExecutionProvider,
+};
+use ort::session::builder::GraphOptimizationLevel;
+use ort::tensor::TensorElementType;
+use ort::value::ValueType;
 
 fn element_count(shape: &[usize]) -> Result<usize, String> {
     shape
@@ -158,15 +165,15 @@ pub fn map_eps(env: rustler::env::Env, eps: Vec<Atom>) -> Vec<ExecutionProviderD
                 .atom_to_string()
                 .unwrap_or_else(|_| CPU.to_string());
             match atom_str.as_str() {
-                CPU => ort::CPUExecutionProvider::default().build(),
-                CUDA => ort::CUDAExecutionProvider::default().build(),
-                TENSORRT => ort::TensorRTExecutionProvider::default().build(),
-                ACL => ort::ACLExecutionProvider::default().build(),
-                ONEDNN => ort::OneDNNExecutionProvider::default().build(),
-                COREML => ort::CoreMLExecutionProvider::default().build(),
-                DIRECTML => ort::DirectMLExecutionProvider::default().build(),
-                ROCM => ort::ROCmExecutionProvider::default().build(),
-                _ => ort::CPUExecutionProvider::default().build(),
+                CPU => CPUExecutionProvider::default().build(),
+                CUDA => CUDAExecutionProvider::default().build(),
+                TENSORRT => TensorRTExecutionProvider::default().build(),
+                ACL => ACLExecutionProvider::default().build(),
+                ONEDNN => OneDNNExecutionProvider::default().build(),
+                COREML => CoreMLExecutionProvider::default().build(),
+                DIRECTML => DirectMLExecutionProvider::default().build(),
+                ROCM => ROCmExecutionProvider::default().build(),
+                _ => CPUExecutionProvider::default().build(),
             }
         })
         .collect()
@@ -182,11 +189,11 @@ pub fn map_opt_level(opt: i32) -> GraphOptimizationLevel {
     }
 }
 
-pub fn is_bool_input(inp: &ort::ValueType) -> bool {
+pub fn is_bool_input(inp: &ValueType) -> bool {
     match inp {
-        ort::ValueType::Tensor { ty, .. } => ty == &ort::TensorElementType::Bool,
-        ort::ValueType::Map { value, .. } => value == &ort::TensorElementType::Bool,
-        ort::ValueType::Sequence(boxed_input) => is_bool_input(boxed_input),
-        ort::ValueType::Optional(boxed_input) => is_bool_input(boxed_input),
+        ValueType::Tensor { ty, .. } => ty == &TensorElementType::Bool,
+        ValueType::Map { value, .. } => value == &TensorElementType::Bool,
+        ValueType::Sequence(boxed_input) => is_bool_input(boxed_input),
+        ValueType::Optional(boxed_input) => is_bool_input(boxed_input),
     }
 }
