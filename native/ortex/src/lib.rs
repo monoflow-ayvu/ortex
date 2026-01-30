@@ -12,9 +12,94 @@ mod utils;
 use model::OrtexModel;
 use tensor::OrtexTensor;
 
+use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
+
+use rustler::resource::{
+    open_struct_resource_type, NIF_RESOURCE_FLAGS, ResourceType, ResourceTypeProvider,
+};
 use rustler::resource::ResourceArc;
 use rustler::types::Binary;
 use rustler::{Atom, Env, NifResult, Term};
+
+static ORTEX_MODEL_TYPE: AtomicPtr<ResourceType<OrtexModel>> = AtomicPtr::new(ptr::null_mut());
+static ORTEX_TENSOR_TYPE: AtomicPtr<ResourceType<OrtexTensor>> = AtomicPtr::new(ptr::null_mut());
+
+impl ResourceTypeProvider for OrtexModel {
+    fn get_type() -> &'static ResourceType<Self> {
+        let ptr = ORTEX_MODEL_TYPE.load(Ordering::Acquire);
+        if ptr.is_null() {
+            panic!(
+                "OrtexModel resource type is not initialized. Did you call the NIF load function?"
+            );
+        }
+        unsafe { &*ptr }
+    }
+}
+
+impl ResourceTypeProvider for OrtexTensor {
+    fn get_type() -> &'static ResourceType<Self> {
+        let ptr = ORTEX_TENSOR_TYPE.load(Ordering::Acquire);
+        if ptr.is_null() {
+            panic!(
+                "OrtexTensor resource type is not initialized. Did you call the NIF load function?"
+            );
+        }
+        unsafe { &*ptr }
+    }
+}
+
+fn load(env: Env, _info: Term) -> bool {
+    if ORTEX_MODEL_TYPE.load(Ordering::Acquire).is_null() {
+        let model_type = match open_struct_resource_type::<OrtexModel>(
+            env,
+            concat!(stringify!(OrtexModel), "\x00"),
+            NIF_RESOURCE_FLAGS::ERL_NIF_RT_CREATE,
+        ) {
+            Some(resource_type) => resource_type,
+            None => {
+                println!("Failure in creating OrtexModel resource type");
+                return false;
+            }
+        };
+
+        let model_ptr = Box::into_raw(Box::new(model_type));
+        if ORTEX_MODEL_TYPE
+            .compare_exchange(ptr::null_mut(), model_ptr, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            unsafe {
+                drop(Box::from_raw(model_ptr));
+            }
+        }
+    }
+
+    if ORTEX_TENSOR_TYPE.load(Ordering::Acquire).is_null() {
+        let tensor_type = match open_struct_resource_type::<OrtexTensor>(
+            env,
+            concat!(stringify!(OrtexTensor), "\x00"),
+            NIF_RESOURCE_FLAGS::ERL_NIF_RT_CREATE,
+        ) {
+            Some(resource_type) => resource_type,
+            None => {
+                println!("Failure in creating OrtexTensor resource type");
+                return false;
+            }
+        };
+
+        let tensor_ptr = Box::into_raw(Box::new(tensor_type));
+        if ORTEX_TENSOR_TYPE
+            .compare_exchange(ptr::null_mut(), tensor_ptr, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            unsafe {
+                drop(Box::from_raw(tensor_ptr));
+            }
+        }
+    }
+
+    true
+}
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn init(
@@ -71,7 +156,7 @@ fn to_binary<'a>(
 }
 
 #[rustler::nif]
-pub fn slice<'a>(
+pub fn slice(
     tensor: ResourceArc<OrtexTensor>,
     start_indicies: Vec<isize>,
     lengths: Vec<isize>,
@@ -85,7 +170,7 @@ pub fn slice<'a>(
 }
 
 #[rustler::nif]
-pub fn reshape<'a>(
+pub fn reshape(
     tensor: ResourceArc<OrtexTensor>,
     shape: Vec<usize>,
 ) -> NifResult<ResourceArc<OrtexTensor>> {
@@ -93,7 +178,7 @@ pub fn reshape<'a>(
 }
 
 #[rustler::nif]
-pub fn concatenate<'a>(
+pub fn concatenate(
     tensors: Vec<ResourceArc<OrtexTensor>>,
     dtype: Term,
     axis: i32,
@@ -116,9 +201,5 @@ rustler::init!(
         reshape,
         concatenate
     ],
-    load = |env: Env, _| {
-        rustler::resource!(OrtexModel, env);
-        rustler::resource!(OrtexTensor, env);
-        true
-    }
+    load = load
 );

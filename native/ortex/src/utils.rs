@@ -14,7 +14,7 @@ use rustler::{Atom, Env, NifResult};
 use ort::{ExecutionProviderDispatch, GraphOptimizationLevel};
 
 /// A faster (unsafe) way of creating an Array from an Erlang binary
-fn initialize_from_raw_ptr<T>(ptr: *const T, shape: &[Ix]) -> ArrayViewMut<T, IxDyn> {
+fn initialize_from_raw_ptr<T>(ptr: *const T, shape: &[Ix]) -> ArrayViewMut<'_, T, IxDyn> {
     let array = unsafe { ArrayViewMut::from_shape_ptr(shape, ptr as *mut T) };
     array
 }
