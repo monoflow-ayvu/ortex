@@ -5,6 +5,7 @@ defmodule Ortex.Util do
     Elixir can use
   """
   def copy_ort_libs() do
+    suppress_warning? = suppress_copy_warning?()
     build_root = Path.absname(:code.priv_dir(:ortex)) |> Path.dirname()
     ort_lib_location = System.get_env("ORT_LIB_LOCATION")
     destination_dir = Path.join([:code.priv_dir(:ortex), "native"])
@@ -37,16 +38,11 @@ defmodule Ortex.Util do
         Destination: #{destination_dir}
         """
 
-      onnx_runtime_paths == [] and test_env?() ->
+      onnx_runtime_paths == [] and (test_env?() or suppress_warning?) ->
         :ok
 
       onnx_runtime_paths == [] ->
-        IO.warn("""
-        Unable to locate libonnxruntime binaries.
-        Searched: #{Enum.join(search_patterns, ", ")}
-        Destination: #{destination_dir}
-        Set ORT_LIB_LOCATION or run mix compile to build the NIF.
-        """)
+        :ok
 
       true ->
         Enum.each(onnx_runtime_paths, fn path ->
@@ -72,7 +68,9 @@ defmodule Ortex.Util do
     expanded = Path.expand(path)
 
     if File.dir?(expanded) do
-      [lib_glob(expanded)]
+      [expanded, Path.join(expanded, "lib"), Path.join(expanded, "lib64")]
+      |> Enum.filter(&File.dir?/1)
+      |> Enum.map(&lib_glob/1)
     else
       [expanded]
     end
@@ -111,6 +109,18 @@ defmodule Ortex.Util do
 
       true ->
         System.get_env("MIX_ENV") == "test"
+    end
+  end
+
+  defp suppress_copy_warning?() do
+    truthy_env?("ORTEX_SKIP_COMPILE") or truthy_env?("ORTEX_SKIP_DOWNLOAD") or
+      truthy_env?("ORT_PREFER_DYNAMIC_LINK")
+  end
+
+  defp truthy_env?(name) do
+    case System.get_env(name) do
+      nil -> false
+      value -> String.downcase(value) in ["1", "true", "yes", "on"]
     end
   end
 end
