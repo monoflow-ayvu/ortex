@@ -14,14 +14,19 @@ use std::convert::TryInto;
 use std::iter::zip;
 
 use ort::{Error, ExecutionProviderDispatch, Session};
-use rustler::resource::ResourceArc;
-use rustler::Atom;
+use rustler::{Atom, Resource, ResourceArc};
 
 /// Holds the model state which include onnxruntime session and environment. All
 /// are threadsafe so this can be called concurrently from the beam.
 pub struct OrtexModel {
     pub session: ort::Session,
 }
+
+#[rustler::resource_impl(name = "OrtexModel")]
+impl Resource for OrtexModel {}
+
+impl std::panic::RefUnwindSafe for OrtexModel {}
+impl std::panic::UnwindSafe for OrtexModel {}
 
 // Since we're only using the session for inference and
 // inference is threadsafe, this Sync is safe. Additionally,

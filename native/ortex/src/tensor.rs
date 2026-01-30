@@ -3,8 +3,7 @@ use core::convert::TryFrom;
 use ndarray::prelude::*;
 use ndarray::{ArrayBase, ArrayView, Data, IxDyn, IxDynImpl, ViewRepr};
 use ort::{DynValue, Error, Value};
-use rustler::resource::ResourceArc;
-use rustler::{Atom, Error as RustlerError};
+use rustler::{Atom, Error as RustlerError, Resource, ResourceArc};
 use std::convert::TryInto;
 
 use crate::constants::ortex_atoms;
@@ -30,6 +29,9 @@ pub enum OrtexTensor {
     // Nx-facing code treats bool tensors as u8 outputs.
     bool(Array<bool, IxDyn>),
 }
+
+#[rustler::resource_impl(name = "OrtexTensor")]
+impl Resource for OrtexTensor {}
 
 impl OrtexTensor {
     pub fn shape(&self) -> Vec<usize> {

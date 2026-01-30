@@ -5,9 +5,8 @@ use crate::constants::*;
 use crate::tensor::OrtexTensor;
 use ndarray::{Array, IxDyn};
 
-use rustler::resource::ResourceArc;
 use rustler::types::Binary;
-use rustler::{Atom, Env, Error as RustlerError, NifResult};
+use rustler::{Atom, Env, Error as RustlerError, NifResult, ResourceArc};
 
 use ort::{ExecutionProviderDispatch, GraphOptimizationLevel};
 
