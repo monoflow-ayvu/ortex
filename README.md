@@ -56,7 +56,7 @@ iex> result |> Nx.backend_transfer() |> Nx.argmax(axis: 1)
 ```elixir
 def deps do
   [
-    {:ortex, "~> 0.1.10"}
+    {:ortex, "~> 0.2.0-rc.1"}
   ]
 end
 ```
