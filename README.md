@@ -63,6 +63,16 @@ end
 
 You will need [Rust](https://www.rust-lang.org/tools/install) for compilation to succeed.
 
+### Precompiled NIFs
+
+If you are packaging Ortex with a precompiled NIF, set `ORTEX_SKIP_COMPILE=1` during
+compilation to avoid building the Rust crate. Ensure the NIF (and any required
+`libonnxruntime` binaries) are available in `priv/native` for the target platform.
+
+```sh
+ORTEX_SKIP_COMPILE=1 mix compile
+```
+
 ## Execution provider features
 
 Ortex relies on `ort` cargo features to compile support for non-CPU execution providers.
