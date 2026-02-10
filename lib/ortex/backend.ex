@@ -88,6 +88,7 @@ defmodule Ortex.Backend do
   @impl true
   def reshape(out, %T{data: %B{ref: ref}}) do
     shape = Nx.shape(out) |> Tuple.to_list()
+
     case Ortex.Native.reshape(ref, shape) do
       {:error, msg} -> raise msg
       res -> put_in(out.data, %B{ref: res})
@@ -106,14 +107,13 @@ defmodule Ortex.Backend do
         out
         | shape: new_shape,
           names: new_names,
-          data:
-            %B{
-              ref:
-                case Ortex.Native.reshape(ref, new_shape |> Tuple.to_list()) do
-                  {:error, msg} -> raise msg
-                  res -> res
-                end
-            }
+          data: %B{
+            ref:
+              case Ortex.Native.reshape(ref, new_shape |> Tuple.to_list()) do
+                {:error, msg} -> raise msg
+                res -> res
+              end
+          }
       }
     end
   end
