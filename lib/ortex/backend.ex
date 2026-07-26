@@ -31,21 +31,13 @@ defmodule Ortex.Backend do
 
   @impl true
   def from_binary(%T{shape: shape, type: type} = tensor, binary, _backend_options) do
-    data =
-      case Ortex.Native.from_binary(binary, shape, type) do
-        {:error, msg} -> raise msg
-        res -> res
-      end
-
-    put_in(tensor.data, %Ortex.Backend{ref: data})
+    ref = unwrap!(Ortex.Native.from_binary(binary, shape, type))
+    put_in(tensor.data, %B{ref: ref})
   end
 
   @impl true
   def to_binary(%T{data: %B{ref: ref}, type: {_, size}}, limit) do
-    case Ortex.Native.to_binary(ref, size, limit) do
-      {:error, msg} -> raise msg
-      res -> res
-    end
+    unwrap!(Ortex.Native.to_binary(ref, size, limit))
   end
 
   @impl true

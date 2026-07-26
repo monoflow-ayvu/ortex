@@ -18,6 +18,12 @@ defmodule Ortex do
   `config.exs` where `EXECUTION_PROVIDERS` is a list of strings of which execution providers
   to enable.
 
+  `qnn_opts` configures the QNN execution provider (ignored unless `:qnn` is among `eps`).
+  `backend_path` and `provider_path` select the QNN libraries; `trace_path` writes an ORT
+  trace there; a key of the form `"env.NAME"` exports `NAME` into the OS environment before
+  the session is built, which is the only way QNN's own `getenv` calls can see it. Everything
+  else is passed through as a QNN provider option, e.g. `htp_arch: 68`.
+
   ## Examples
 
       iex> Ortex.load("./models/tinymodel.onnx")
