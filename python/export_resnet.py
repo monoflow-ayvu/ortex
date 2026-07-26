@@ -1,40 +1,24 @@
+import importlib.util
 from pathlib import Path
-import importlib
 
 import torch
 from torchvision.models import ResNet50_Weights, resnet50
 
+if importlib.util.find_spec("onnx") is None:
+    raise SystemExit("torch.onnx.export needs onnx: python3 -m pip install onnx")
 
-def require_module(module_name: str, pip_name: str | None = None) -> None:
-    try:
-        importlib.import_module(module_name)
-    except ModuleNotFoundError:
-        install_name = pip_name or module_name
-        raise SystemExit(
-            f"Missing dependency: {module_name}. "
-            f"Install it with `python3 -m pip install {install_name}`."
-        )
+# The dynamo exporter needs onnxscript; without it fall back to the legacy tracer.
+dynamo = importlib.util.find_spec("onnxscript") is not None
+if not dynamo:
+    print("onnxscript not available, exporting with the legacy ONNX exporter")
 
-
-require_module("onnx")
-
-USE_DYNAMO = True
-try:
-    importlib.import_module("onnxscript")
-except ModuleNotFoundError:
-    USE_DYNAMO = False
+models_dir = Path(__file__).resolve().parents[1] / "models"
+models_dir.mkdir(exist_ok=True)
+output_path = models_dir / "resnet50.onnx"
 
 model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
 model.eval()
-
 onnx_input = torch.randn(1, 3, 224, 224)
-repo_root = Path(__file__).resolve().parents[1]
-models_dir = repo_root / "models"
-models_dir.mkdir(parents=True, exist_ok=True)
-output_path = models_dir / "resnet50.onnx"
-
-if not USE_DYNAMO:
-    print("onnxscript not available; exporting with legacy ONNX exporter.")
 
 with torch.inference_mode():
     torch.onnx.export(
@@ -47,7 +31,7 @@ with torch.inference_mode():
         dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
         export_params=True,
         opset_version=19,
-        dynamo=USE_DYNAMO,
+        dynamo=dynamo,
     )
 
 print(f"Wrote {output_path}")

@@ -6,9 +6,9 @@ config :elixir, :dbg_callback, {Macro, :dbg, []}
 config :ortex,
   add_backend_on_inspect: config_env() != :test
 
-# Set the cargo feature flags required to use the matching execution provider
-# based on the OS we're running on
-default_ortex_features =
+# Cargo feature flags for the execution provider to compile in. Defaults to what
+# the host OS can use, overridable with e.g. ORTEX_FEATURES=cuda,tensorrt
+default_features =
   case :os.type() do
     {:win32, _} -> ["directml"]
     {:unix, :darwin} -> ["coreml"]
@@ -17,8 +17,7 @@ default_ortex_features =
 
 ortex_features =
   case System.get_env("ORTEX_FEATURES") do
-    nil -> default_ortex_features
-    "" -> []
+    nil -> default_features
     features -> String.split(features, ",", trim: true)
   end
 

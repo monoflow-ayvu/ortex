@@ -57,10 +57,12 @@ defmodule Ortex.Backend do
 
   @impl true
   def inspect(%T{} = tensor, inspect_opts) do
+    size = Nx.size(tensor)
+
     limit =
       case inspect_opts.limit do
-        :infinity -> Nx.size(tensor)
-        value -> min(value + 1, Nx.size(tensor))
+        :infinity -> size
+        n -> min(n + 1, size)
       end
 
     tensor
@@ -70,21 +72,15 @@ defmodule Ortex.Backend do
   end
 
   @impl true
-  def slice(out, %T{data: %B{ref: tensor_ref}}, start_indicies, lengths, strides) do
-    case Ortex.Native.slice(tensor_ref, start_indicies, lengths, strides) do
-      {:error, msg} -> raise msg
-      res -> put_in(out.data, %B{ref: res})
-    end
+  def slice(out, %T{data: %B{ref: ref}}, start_indicies, lengths, strides) do
+    sliced = unwrap!(Ortex.Native.slice(ref, start_indicies, lengths, strides))
+    put_in(out.data, %B{ref: sliced})
   end
 
   @impl true
   def reshape(out, %T{data: %B{ref: ref}}) do
     shape = Nx.shape(out) |> Tuple.to_list()
-
-    case Ortex.Native.reshape(ref, shape) do
-      {:error, msg} -> raise msg
-      res -> put_in(out.data, %B{ref: res})
-    end
+    put_in(out.data, %B{ref: unwrap!(Ortex.Native.reshape(ref, shape))})
   end
 
   @impl true
@@ -95,18 +91,8 @@ defmodule Ortex.Backend do
     if old_shape == new_shape do
       %{out | data: %B{ref: ref}}
     else
-      %{
-        out
-        | shape: new_shape,
-          names: new_names,
-          data: %B{
-            ref:
-              case Ortex.Native.reshape(ref, new_shape |> Tuple.to_list()) do
-                {:error, msg} -> raise msg
-                res -> res
-              end
-          }
-      }
+      squeezed = unwrap!(Ortex.Native.reshape(ref, Tuple.to_list(new_shape)))
+      %{out | shape: new_shape, names: new_names, data: %B{ref: squeezed}}
     end
   end
 
@@ -123,12 +109,11 @@ defmodule Ortex.Backend do
       end)
 
     type = out.type
-
-    case Ortex.Native.concatenate(tensor_refs, type, axis) do
-      {:error, msg} -> raise msg
-      res -> %{out | data: %B{ref: res}}
-    end
+    %{out | data: %B{ref: unwrap!(Ortex.Native.concatenate(tensor_refs, type, axis))}}
   end
+
+  defp unwrap!({:error, msg}), do: raise(msg)
+  defp unwrap!(ref), do: ref
 
   if Application.compile_env(:ortex, :add_backend_on_inspect, true) do
     defp maybe_add_signature(result, %T{data: %B{ref: _mat_ref}}) do

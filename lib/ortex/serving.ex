@@ -59,28 +59,17 @@ defmodule Ortex.Serving do
   @behaviour Nx.Serving
 
   @impl true
-  def init(_inline_or_process, model, defn_options) when is_list(defn_options) do
-    defn_options =
-      Enum.map(defn_options, fn opts ->
-        opts = if is_list(opts), do: opts, else: []
-        Keyword.put_new(opts, :compiler, Nx.Defn.Evaluator)
-      end)
-
-    func = fn x -> Ortex.run(model, x) end
-    {:ok, {func, defn_options}}
+  def init(_inline_or_process, model, defn_options) do
+    # handle_batch/3 only jits an identity fn, so don't drag in a real defn compiler
+    defn_options = Enum.map(defn_options, &Keyword.put_new(&1, :compiler, Nx.Defn.Evaluator))
+    {:ok, {fn x -> Ortex.run(model, x) end, defn_options}}
   end
 
   @impl true
-  def handle_batch(batch, partition, {function, defn_options}) do
-    opts = Enum.at(defn_options, partition) || []
-
-    materialized =
-      case batch do
-        %Nx.Batch{} -> Nx.Defn.jit_apply(&Function.identity/1, [batch], opts)
-        _ -> batch
-      end
-
-    out = function.(materialized)
-    {:execute, fn -> {out, :server_info} end, {function, defn_options}}
+  def handle_batch(batch, partition, {run, defn_options} = state) do
+    # A hack to move the batch back into a tensor for Ortex
+    opts = Enum.at(defn_options, partition)
+    out = run.(Nx.Defn.jit_apply(&Function.identity/1, [batch], opts))
+    {:execute, fn -> {out, :server_info} end, state}
   end
 end

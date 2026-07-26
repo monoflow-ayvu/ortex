@@ -9,11 +9,15 @@ mod model;
 mod tensor;
 mod utils;
 
+use model::IoSpec;
 use tensor::OrtexTensor;
 
-use rustler::ResourceArc;
 use rustler::types::Binary;
-use rustler::{Atom, Env, NifResult, Term};
+use rustler::{Atom, Env, NifResult, ResourceArc, Term};
+
+fn nif_error<E: std::fmt::Display>(e: E) -> rustler::Error {
+    rustler::Error::Term(Box::new(e.to_string()))
+}
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn init(
@@ -24,20 +28,13 @@ fn init(
     qnn_opts: Vec<(String, String)>,
 ) -> NifResult<ResourceArc<model::OrtexModel>> {
     let use_qnn = utils::wants_qnn(env, &eps);
-    let eps = utils::map_eps(env, eps)
-        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
-    let model = model::init(model_path, eps, use_qnn, opt, qnn_opts)
-        .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))?;
+    let eps = utils::map_eps(env, eps).map_err(nif_error)?;
+    let model = model::init(model_path, eps, use_qnn, opt, qnn_opts).map_err(nif_error)?;
     Ok(ResourceArc::new(model))
 }
 
 #[rustler::nif]
-fn show_session(
-    model: ResourceArc<model::OrtexModel>,
-) -> NifResult<(
-    Vec<(String, String, Option<Vec<i64>>)>,
-    Vec<(String, String, Option<Vec<i64>>)>,
-)> {
+fn show_session(model: ResourceArc<model::OrtexModel>) -> NifResult<(IoSpec, IoSpec)> {
     Ok(model::show(model))
 }
 
@@ -46,7 +43,7 @@ fn run(
     model: ResourceArc<model::OrtexModel>,
     inputs: Vec<ResourceArc<OrtexTensor>>,
 ) -> NifResult<Vec<(ResourceArc<OrtexTensor>, Vec<usize>, Atom, usize)>> {
-    model::run(model, inputs).map_err(|e| rustler::Error::Term(Box::new(e.to_string())))
+    model::run(model, inputs).map_err(nif_error)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -58,8 +55,7 @@ fn from_binary(bin: Binary, shape: Term, dtype: Term) -> NifResult<ResourceArc<O
     let (dtype_t, dtype_bits): (Term, usize) = dtype.decode()?;
     let dtype_str = dtype_t.atom_to_string()?;
 
-    utils::from_binary(bin, shape, dtype_str, dtype_bits)
-        .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))
+    utils::from_binary(bin, shape, dtype_str, dtype_bits).map_err(nif_error)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -102,8 +98,8 @@ pub fn concatenate(
 ) -> NifResult<ResourceArc<OrtexTensor>> {
     let (dtype_t, dtype_bits): (Term, usize) = dtype.decode()?;
     let dtype_str = dtype_t.atom_to_string()?;
-    let concatted = tensor::concatenate(tensors, (&dtype_str, dtype_bits), axis as usize)
-        .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))?;
+    let concatted =
+        tensor::concatenate(tensors, (&dtype_str, dtype_bits), axis as usize).map_err(nif_error)?;
     Ok(ResourceArc::new(concatted))
 }
 

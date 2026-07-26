@@ -23,7 +23,7 @@ defmodule Ortex.Model do
 
   @doc false
   def load(path, eps \\ [:cpu], opt \\ 3, qnn_opts \\ []) do
-    case Ortex.Native.init(path, eps, opt, normalize_qnn_opts(qnn_opts)) do
+    case Ortex.Native.init(path, eps, opt, stringify_opts(qnn_opts)) do
       {:error, msg} ->
         raise msg
 
@@ -32,13 +32,9 @@ defmodule Ortex.Model do
     end
   end
 
-  # Both key and value reach the NIF as strings. Keys prefixed "env." are set in
-  # the real process environment by the NIF, which is the only way to make a
-  # variable visible to getenv() in onnxruntime and the QNN libraries -
-  # System.put_env/2 does not touch the OS environment (OTP 21+).
-  defp normalize_qnn_opts(opts) do
-    Enum.map(opts, fn {k, v} -> {to_string(k), to_string(v)} end)
-  end
+  # The NIF takes both key and value as strings; keys prefixed "env." it exports to the
+  # OS environment, the only place QNN's getenv() lookups will find them.
+  defp stringify_opts(opts), do: Enum.map(opts, fn {k, v} -> {to_string(k), to_string(v)} end)
 
   @doc false
   def run(%Ortex.Model{} = model, tensor) when not is_tuple(tensor) do

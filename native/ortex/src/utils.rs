@@ -6,53 +6,39 @@ use crate::tensor::OrtexTensor;
 use ndarray::{Array, IxDyn};
 
 use rustler::types::Binary;
-use rustler::{Atom, Env, Error as RustlerError, NifResult, ResourceArc};
+use rustler::{Atom, Env, NifResult, ResourceArc};
 
 use ort::execution_providers::{
     ACLExecutionProvider, CPUExecutionProvider, CUDAExecutionProvider, CoreMLExecutionProvider,
     DirectMLExecutionProvider, ExecutionProviderDispatch, OneDNNExecutionProvider,
-    QNNExecutionProvider, ROCmExecutionProvider, TensorRTExecutionProvider,
+    ROCmExecutionProvider, TensorRTExecutionProvider,
 };
 use ort::session::builder::GraphOptimizationLevel;
-use ort::value::TensorElementType;
-use ort::value::ValueType;
+use ort::value::{TensorElementType, ValueType};
 
-fn element_count(shape: &[usize]) -> Result<usize, String> {
-    shape
-        .iter()
-        .try_fold(1usize, |acc, dim| {
-            acc.checked_mul(*dim)
-                .ok_or_else(|| "Tensor shape is too large to index".to_string())
-        })
-}
-
+/// Copies an Erlang binary into an owned array. The length has to be checked up front
+/// because the copy itself is unchecked.
 fn array_from_binary<T: Copy + Default>(
     bin: &Binary,
     shape: &[usize],
 ) -> Result<Array<T, IxDyn>, String> {
-    let elements = element_count(shape)?;
-    let elem_size = std::mem::size_of::<T>();
-    let expected_bytes = elements
-        .checked_mul(elem_size)
-        .ok_or_else(|| "Tensor binary size overflows usize".to_string())?;
+    let elements = shape
+        .iter()
+        .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
+        .ok_or_else(|| format!("Tensor shape {shape:?} is too large to index"))?;
+    let expected = elements.saturating_mul(std::mem::size_of::<T>());
 
-    if bin.len() != expected_bytes {
+    if bin.len() != expected {
         return Err(format!(
-            "Binary length mismatch for shape {:?}: expected {} bytes, got {}",
-            shape,
-            expected_bytes,
+            "Binary length mismatch for shape {shape:?}: expected {expected} bytes, got {}",
             bin.len()
         ));
     }
 
     let mut data = vec![T::default(); elements];
-    if expected_bytes > 0 {
+    if expected > 0 {
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                bin.as_ptr(),
-                data.as_mut_ptr() as *mut u8,
-                expected_bytes,
-            );
+            std::ptr::copy_nonoverlapping(bin.as_ptr(), data.as_mut_ptr() as *mut u8, expected);
         }
     }
 
@@ -78,46 +64,30 @@ pub fn from_binary(
     dtype_str: String,
     dtype_bits: usize,
 ) -> Result<ResourceArc<OrtexTensor>, String> {
-    match (dtype_str.as_ref(), dtype_bits) {
-        ("bf", 16) => Ok(ResourceArc::new(OrtexTensor::bf16(
-            array_from_binary::<half::bf16>(&bin, &shape)?,
-        ))),
-        ("f", 16) => Ok(ResourceArc::new(OrtexTensor::f16(
-            array_from_binary::<half::f16>(&bin, &shape)?,
-        ))),
-        ("f", 32) => Ok(ResourceArc::new(OrtexTensor::f32(array_from_binary::<f32>(
-            &bin, &shape,
-        )?))),
-        ("f", 64) => Ok(ResourceArc::new(OrtexTensor::f64(array_from_binary::<f64>(
-            &bin, &shape,
-        )?))),
-        ("s", 8) => Ok(ResourceArc::new(OrtexTensor::s8(array_from_binary::<i8>(
-            &bin, &shape,
-        )?))),
-        ("s", 16) => Ok(ResourceArc::new(OrtexTensor::s16(array_from_binary::<i16>(
-            &bin, &shape,
-        )?))),
-        ("s", 32) => Ok(ResourceArc::new(OrtexTensor::s32(array_from_binary::<i32>(
-            &bin, &shape,
-        )?))),
-        ("s", 64) => Ok(ResourceArc::new(OrtexTensor::s64(array_from_binary::<i64>(
-            &bin, &shape,
-        )?))),
-        ("u", 8) => Ok(ResourceArc::new(OrtexTensor::u8(array_from_binary::<u8>(
-            &bin, &shape,
-        )?))),
-        ("u", 16) => Ok(ResourceArc::new(OrtexTensor::u16(array_from_binary::<u16>(
-            &bin, &shape,
-        )?))),
-        ("u", 32) => Ok(ResourceArc::new(OrtexTensor::u32(array_from_binary::<u32>(
-            &bin, &shape,
-        )?))),
-        ("u", 64) => Ok(ResourceArc::new(OrtexTensor::u64(array_from_binary::<u64>(
-            &bin, &shape,
-        )?))),
-        (&_, _) => Err(format!(
-            "Unsupported dtype {} with {} bits",
-            dtype_str, dtype_bits
+    // `typ` is the element type, `ort_tensor_kind` the matching OrtexTensor variant
+    macro_rules! tensor {
+        ($typ:ty, $ort_tensor_kind:ident) => {
+            Ok(ResourceArc::new(OrtexTensor::$ort_tensor_kind(
+                array_from_binary::<$typ>(&bin, &shape)?,
+            )))
+        };
+    }
+
+    match (dtype_str.as_str(), dtype_bits) {
+        ("bf", 16) => tensor!(half::bf16, bf16),
+        ("f", 16) => tensor!(half::f16, f16),
+        ("f", 32) => tensor!(f32, f32),
+        ("f", 64) => tensor!(f64, f64),
+        ("s", 8) => tensor!(i8, s8),
+        ("s", 16) => tensor!(i16, s16),
+        ("s", 32) => tensor!(i32, s32),
+        ("s", 64) => tensor!(i64, s64),
+        ("u", 8) => tensor!(u8, u8),
+        ("u", 16) => tensor!(u16, u16),
+        ("u", 32) => tensor!(u32, u32),
+        ("u", 64) => tensor!(u64, u64),
+        _ => Err(format!(
+            "Unsupported dtype {dtype_str} with {dtype_bits} bits"
         )),
     }
 }
@@ -130,122 +100,80 @@ pub fn to_binary<'a>(
     bits: usize,
     limit: usize,
 ) -> NifResult<Binary<'a>> {
-    if bits == 0 || limit == 0 {
+    // `Ortex.Backend.backend_transfer/3` asks for the whole tensor with a limit of 0.
+    if limit == 0 {
         return Ok(reference.make_binary(env, |x| x.to_bytes()));
     }
 
-    if bits % 8 != 0 {
-        return Err(RustlerError::Term(Box::new(format!(
-            "Invalid element bit size: {}",
-            bits
-        ))));
-    }
-
-    let elem_size = bits / 8;
-    let elem_count = element_count(&reference.shape())
-        .map_err(|e| RustlerError::Term(Box::new(e)))?;
-    let capped = std::cmp::min(limit, elem_count);
-    let byte_limit = capped
-        .checked_mul(elem_size)
-        .ok_or_else(|| RustlerError::Term(Box::new("Binary size overflows usize".to_string())))?;
-
+    let byte_limit = limit.saturating_mul(bits / 8);
     Ok(reference.make_binary(env, |x| {
         let bytes = x.to_bytes();
-        let len = std::cmp::min(byte_limit, bytes.len());
-        &bytes[..len]
+        &bytes[..byte_limit.min(bytes.len())]
     }))
 }
 
-/// Takes a vec of Atoms and transforms them into a vec of ExecutionProvider Enums
-/// True if `:qnn` is among the requested providers.
-///
-/// QNN cannot go through `map_eps`: on upstream ONNX Runtime builds it is a
-/// *plugin* execution provider, which is selected with the V2 device API
-/// (`SessionBuilder::with_devices`) rather than by appending an
-/// `ExecutionProviderDispatch`. `model::init` handles it separately, so it is
-/// filtered out of the dispatch list here.
-pub fn wants_qnn(env: rustler::env::Env, eps: &[Atom]) -> bool {
-    eps.iter().any(|e| {
-        e.to_term(env)
-            .atom_to_string()
-            .map(|s| s == QNN)
-            .unwrap_or(false)
-    })
+fn provider_name(env: Env, ep: &Atom) -> String {
+    ep.to_term(env).atom_to_string().unwrap_or_default()
 }
 
-pub fn map_eps(
-    env: rustler::env::Env,
-    eps: Vec<Atom>,
-) -> Result<Vec<ExecutionProviderDispatch>, String> {
+/// True if `:qnn` is among the requested providers.
+///
+/// QNN cannot go through `map_eps`: on upstream ONNX Runtime builds it is a *plugin*
+/// execution provider, selected with the V2 device API (`SessionBuilder::with_devices`)
+/// rather than by appending an `ExecutionProviderDispatch`. `model::init` handles it
+/// separately, so `map_eps` drops it from the dispatch list.
+pub fn wants_qnn(env: Env, eps: &[Atom]) -> bool {
+    eps.iter().any(|e| provider_name(env, e) == QNN)
+}
+
+/// Takes a vec of Atoms and transforms them into a vec of ExecutionProvider Enums
+pub fn map_eps(env: Env, eps: Vec<Atom>) -> Result<Vec<ExecutionProviderDispatch>, String> {
     eps.iter()
-        .filter(|e| {
-            e.to_term(env)
-                .atom_to_string()
-                .map(|s| s != QNN)
-                .unwrap_or(true)
-        })
-        .map(|e| {
-            let atom_str = e
-                .to_term(env)
-                .atom_to_string()
-                .map_err(|_| "Execution provider must be an atom".to_string())?;
-            match atom_str.as_str() {
-                CPU => Ok(CPUExecutionProvider::default().build()),
-                CUDA => Ok(CUDAExecutionProvider::default().build()),
-                TENSORRT => Ok(TensorRTExecutionProvider::default().build()),
-                ACL => Ok(ACLExecutionProvider::default().build()),
-                ONEDNN | "dnnl" => Ok(OneDNNExecutionProvider::default().build()),
-                COREML => Ok(CoreMLExecutionProvider::default().build()),
-                DIRECTML => Ok(DirectMLExecutionProvider::default().build()),
-                ROCM => Ok(ROCmExecutionProvider::default().build()),
-                _ => Err(format!(
-                    "Unknown execution provider: {}. Expected one of: {}",
-                    atom_str,
-                    vec![
-                        CPU, CUDA, TENSORRT, ACL, ONEDNN, "dnnl", COREML, DIRECTML, ROCM, QNN
-                    ]
-                    .join(", ")
-                )),
-            }
+        .map(|e| provider_name(env, e))
+        .filter(|name| name != QNN)
+        .map(|name| match name.as_str() {
+            CPU => Ok(CPUExecutionProvider::default().build()),
+            CUDA => Ok(CUDAExecutionProvider::default().build()),
+            TENSORRT => Ok(TensorRTExecutionProvider::default().build()),
+            ACL => Ok(ACLExecutionProvider::default().build()),
+            ONEDNN | DNNL => Ok(OneDNNExecutionProvider::default().build()),
+            COREML => Ok(CoreMLExecutionProvider::default().build()),
+            DIRECTML => Ok(DirectMLExecutionProvider::default().build()),
+            ROCM => Ok(ROCmExecutionProvider::default().build()),
+            _ => Err(format!(
+                "Unknown execution provider: {}. Expected one of: {}",
+                name,
+                [CPU, CUDA, TENSORRT, ACL, ONEDNN, DNNL, COREML, DIRECTML, ROCM, QNN].join(", ")
+            )),
         })
         .collect()
 }
 
 /// Register the Qualcomm QNN *plugin* execution provider library, once.
 ///
-/// Upstream `libonnxruntime.so` is NOT built with `--use_qnn`, so appending
-/// "QNN" by name fails with "QNN execution provider is not supported in this
-/// build." QNN ships as a plugin EP (`libonnxruntime_providers_qnn.so`) which
-/// must be registered with the environment (ORT >= 1.23
-/// `RegisterExecutionProviderLibrary`) and then selected via the V2 device API,
-/// `SessionBuilder::with_devices` - NOT via ExecutionProviderDispatch.
-///
-///   ORTEX_QNN_PROVIDER_PATH  plugin EP library
-///                            (default /usr/lib/libonnxruntime_providers_qnn.so)
-///   ORTEX_QNN_BACKEND_PATH   backend the EP loads
-///                            (default /usr/lib/libQnnHtp.so)
+/// Upstream `libonnxruntime.so` is not built with `--use_qnn`, so appending "QNN" by
+/// name fails with "QNN execution provider is not supported in this build." Instead the
+/// plugin has to be registered with the environment (ORT >= 1.23
+/// `RegisterExecutionProviderLibrary`) and then selected via `with_devices`.
 pub fn register_qnn_library(provider: &str) -> Result<(), String> {
     static REGISTERED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
 
     REGISTERED
         .get_or_init(|| {
-            let provider = provider.to_string();
-            if !std::path::Path::new(&provider).exists() {
+            if !std::path::Path::new(provider).exists() {
                 return Err(format!("QNN plugin EP library not found at {provider}"));
             }
 
             let env = ort::environment::current()
                 .map_err(|e| format!("could not get ONNX Runtime environment: {e}"))?;
+            let lib = env
+                .register_ep_library("QNN", provider)
+                .map_err(|e| format!("failed to register QNN plugin EP from {provider}: {e}"))?;
 
-            match env.register_ep_library("QNN", &provider) {
-                Ok(lib) => {
-                    // Leak: unregistering would invalidate live sessions, and the
-                    // EP must remain available for the process lifetime.
-                    std::mem::forget(lib);
-                    Ok(())
-                }
-                Err(e) => Err(format!("failed to register QNN plugin EP from {provider}: {e}"))
-            }
+            // Unregistering would invalidate live sessions, and the EP has to stay
+            // available for the lifetime of the process.
+            std::mem::forget(lib);
+            Ok(())
         })
         .clone()
 }

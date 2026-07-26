@@ -3,11 +3,13 @@ pub const CPU: &str = "cpu";
 pub const TENSORRT: &str = "tensorrt";
 pub const ACL: &str = "acl";
 pub const ONEDNN: &str = "onednn";
+/// Legacy name for oneDNN, still accepted.
+pub const DNNL: &str = "dnnl";
 pub const COREML: &str = "coreml";
 pub const DIRECTML: &str = "directml";
 pub const ROCM: &str = "rocm";
 /// Qualcomm QNN (Hexagon HTP / NPU). Unlike the other providers this one is a
-/// *plugin* EP on upstream builds: see `utils::qnn_ep`.
+/// *plugin* EP on upstream builds: see `utils::register_qnn_library`.
 pub const QNN: &str = "qnn";
 
 pub mod ortex_atoms {

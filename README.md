@@ -63,47 +63,33 @@ end
 
 You will need [Rust](https://www.rust-lang.org/tools/install) for compilation to succeed.
 
-## Execution provider features
+## Execution Providers
 
-Ortex relies on `ort` cargo features to compile support for non-CPU execution providers.
-Defaults are OS-specific:
-
-- macOS: `coreml`
-- Windows: `directml`
-- Linux: none (CPU-only)
-
-Override via `ORTEX_FEATURES` as a comma-separated list. For example:
+Non-CPU execution providers are compiled in through `ort`'s cargo features. The default
+depends on the OS: `coreml` on macOS, `directml` on Windows, nothing (CPU only) on Linux.
+`ORTEX_FEATURES` overrides it with a comma-separated list of `cuda`, `tensorrt`, `coreml`
+and `directml`:
 
 ```sh
 ORTEX_FEATURES=cuda,tensorrt mix compile
 ```
 
-Enabling GPU providers requires the relevant system toolchains to be installed.
+A feature only enables the bindings; the vendor runtime itself has to be installed already.
 
-### Packaging and Offline Builds
+QNN is the exception. It is registered at session creation rather than compiled in, so it
+needs no feature flag. See `Ortex.load/4` for its options.
 
-If you are packaging Ortex with a precompiled NIF, set `ORTEX_SKIP_COMPILE=1` during
-compilation to avoid building the Rust crate. Ensure the NIF (and any required
-`libonnxruntime` binaries) are available in `priv/native` for the target platform.
+## Packaging and Offline Builds
 
-```sh
-ORTEX_SKIP_COMPILE=1 mix compile
-```
+`ORTEX_SKIP_COMPILE=1` skips building the Rust crate, for packaging against a precompiled
+NIF. That NIF and the `libonnxruntime` it needs must already be in `priv/native` for the
+target platform.
 
-For offline or system-provided ONNX Runtime builds, you can disable downloads and
-link dynamically using a local runtime install:
+To build against an ONNX Runtime that is already installed:
 
 ```sh
 ORTEX_SKIP_DOWNLOAD=1 \
 ORT_PREFER_DYNAMIC_LINK=1 \
 ORT_LIB_LOCATION=/path/to/onnxruntime/lib \
-mix compile
-```
-
-If your package provides `libonnxruntime.pc`, enable pkg-config lookup:
-
-```sh
-ORTEX_FEATURES=pkg-config \
-PKG_CONFIG_PATH=/path/to/onnxruntime/lib/pkgconfig \
 mix compile
 ```

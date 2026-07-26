@@ -3,21 +3,23 @@ defmodule Ortex.TestConcat do
 
   # Testing each type, since there's a bunch of boilerplate that we want to 
   # check for errors on the Rust side
-  %{
-    "s8" => {:s, 8},
-    "s16" => {:s, 16},
-    "s32" => {:s, 32},
-    "s64" => {:s, 64},
-    "u8" => {:u, 8},
-    "u16" => {:u, 16},
-    "u32" => {:u, 32},
-    "u64" => {:u, 64},
-    "f16" => {:f, 16},
-    "bf16" => {:bf, 16},
-    "f32" => {:f, 32},
-    "f64" => {:f, 64}
-  }
-  |> Enum.each(fn {type_str, type_tuple} ->
+  [
+    {:s, 8},
+    {:s, 16},
+    {:s, 32},
+    {:s, 64},
+    {:u, 8},
+    {:u, 16},
+    {:u, 32},
+    {:u, 64},
+    {:f, 16},
+    {:bf, 16},
+    {:f, 32},
+    {:f, 64}
+  ]
+  |> Enum.each(fn type_tuple ->
+    type_str = Nx.Type.to_string(type_tuple)
+
     test "Concat 1d tensors #{type_str}" do
       t1 =
         Nx.tensor([1, 2, 3, 4], type: unquote(type_tuple)) |> Nx.backend_transfer(Ortex.Backend)
