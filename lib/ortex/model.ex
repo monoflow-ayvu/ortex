@@ -83,9 +83,14 @@ defimpl Inspect, for: Ortex.Model do
           concat([
             color("#Ortex.Model<", :map, inspect_opts),
             line(),
-            nest(concat(["  inputs: ", Inspect.List.inspect(inputs, inspect_opts)]), 2),
+            # to_doc/2, not Inspect.List.inspect/2: as of Elixir 1.19 the protocol
+            # implementations return {doc, opts} rather than a bare doc, so
+            # passing one to concat/2 raises FunctionClauseError - which made
+            # inspecting an %Ortex.Model{} in IEx blow up, including as a field of
+            # some other term.
+            nest(concat(["  inputs: ", to_doc(inputs, inspect_opts)]), 2),
             line(),
-            nest(concat(["  outputs: ", Inspect.List.inspect(outputs, inspect_opts)]), 2),
+            nest(concat(["  outputs: ", to_doc(outputs, inspect_opts)]), 2),
             color(">", :map, inspect_opts)
           ])
         )
