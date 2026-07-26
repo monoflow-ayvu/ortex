@@ -35,6 +35,12 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = [
 ] }
 ndarray = "0.17.2"
 half = "2.2.1"
+# ort reports EP registration, device selection and per-node placement through
+# `tracing`. Without a subscriber every one of those messages is dropped, which
+# is why a QNN session that silently fell back to the CPU looked identical to a
+# working one from Elixir. Enabled on demand via ORTEX_TRACE (see model::init).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [features]
 # ONNXRuntime Execution providers

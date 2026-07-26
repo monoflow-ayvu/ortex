@@ -224,12 +224,12 @@ pub fn map_eps(
 ///                            (default /usr/lib/libonnxruntime_providers_qnn.so)
 ///   ORTEX_QNN_BACKEND_PATH   backend the EP loads
 ///                            (default /usr/lib/libQnnHtp.so)
-pub fn register_qnn_library() -> Result<(), String> {
+pub fn register_qnn_library(provider: &str) -> Result<(), String> {
     static REGISTERED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
 
     REGISTERED
         .get_or_init(|| {
-            let provider = qnn_provider_path();
+            let provider = provider.to_string();
             if !std::path::Path::new(&provider).exists() {
                 return Err(format!("QNN plugin EP library not found at {provider}"));
             }

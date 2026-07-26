@@ -25,7 +25,7 @@ defmodule Ortex do
       iex> Ortex.load("./models/tinymodel.onnx", [:cpu], 0)
 
   """
-  defdelegate load(path, eps \\ [:cpu], opt \\ 3), to: Ortex.Model
+  defdelegate load(path, eps \\ [:cpu], opt \\ 3, qnn_opts \\ []), to: Ortex.Model
 
   @doc """
   Run a forward pass through a model.

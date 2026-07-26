@@ -22,14 +22,22 @@ defmodule Ortex.Model do
   defstruct [:reference]
 
   @doc false
-  def load(path, eps \\ [:cpu], opt \\ 3) do
-    case Ortex.Native.init(path, eps, opt) do
+  def load(path, eps \\ [:cpu], opt \\ 3, qnn_opts \\ []) do
+    case Ortex.Native.init(path, eps, opt, normalize_qnn_opts(qnn_opts)) do
       {:error, msg} ->
         raise msg
 
       model ->
         %Ortex.Model{reference: model}
     end
+  end
+
+  # Both key and value reach the NIF as strings. Keys prefixed "env." are set in
+  # the real process environment by the NIF, which is the only way to make a
+  # variable visible to getenv() in onnxruntime and the QNN libraries -
+  # System.put_env/2 does not touch the OS environment (OTP 21+).
+  defp normalize_qnn_opts(opts) do
+    Enum.map(opts, fn {k, v} -> {to_string(k), to_string(v)} end)
   end
 
   @doc false

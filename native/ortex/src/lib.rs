@@ -21,11 +21,12 @@ fn init(
     model_path: String,
     eps: Vec<Atom>,
     opt: i32,
+    qnn_opts: Vec<(String, String)>,
 ) -> NifResult<ResourceArc<model::OrtexModel>> {
     let use_qnn = utils::wants_qnn(env, &eps);
     let eps = utils::map_eps(env, eps)
         .map_err(|e| rustler::Error::Term(Box::new(e)))?;
-    let model = model::init(model_path, eps, use_qnn, opt)
+    let model = model::init(model_path, eps, use_qnn, opt, qnn_opts)
         .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))?;
     Ok(ResourceArc::new(model))
 }

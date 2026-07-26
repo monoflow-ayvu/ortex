@@ -25,6 +25,14 @@ pub struct OrtexModel {
     pub session: Mutex<Session>,
 }
 
+/// Keys in `qnn_opts` that configure ortex itself rather than the QNN EP, and
+/// so must not be forwarded to onnxruntime as provider options.
+const RESERVED: [&str; 3] = ["backend_path", "provider_path", "trace_path"];
+
+fn lookup(opts: &[(String, String)], key: &str) -> Option<String> {
+    opts.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+}
+
 #[rustler::resource_impl(name = "OrtexModel")]
 impl Resource for OrtexModel {}
 
@@ -33,14 +41,63 @@ impl std::panic::UnwindSafe for OrtexModel {}
 
 /// Creates a model given the path to the model and vector of execution providers.
 /// The execution providers are Atoms from Erlang/Elixir.
+/// Send ort's `tracing` output, and onnxruntime's own VERBOSE log, to the file
+/// named by `ORTEX_TRACE`.
+///
+/// A NIF's stdout goes to the Nerves console, not to the caller's shell, so a
+/// file is the only way to read this remotely. Without it every message ort
+/// emits about EP registration, device selection and per-node placement is
+/// discarded - which is precisely how a QNN session that quietly ran on the CPU
+/// was indistinguishable from one on the NPU. Filter with RUST_LOG.
+fn init_tracing_from(qnn_opts: &[(String, String)]) {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+    let from_opts = qnn_opts
+        .iter()
+        .find(|(k, _)| k == "trace_path")
+        .map(|(_, v)| v.clone());
+
+    ONCE.get_or_init(|| {
+        if let Some(path) = from_opts.or_else(|| std::env::var("ORTEX_TRACE").ok()) {
+            if let Ok(file) = std::fs::File::create(&path) {
+                let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "debug".into());
+
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .try_init();
+
+                if let Ok(env) = ort::environment::current() {
+                    env.set_log_level(ort::logging::LogLevel::Verbose);
+                }
+            }
+        }
+    });
+}
+
 pub fn init(
     model_path: String,
     eps: Vec<ExecutionProviderDispatch>,
     use_qnn: bool,
     opt: i32,
+    qnn_opts: Vec<(String, String)>,
 ) -> Result<OrtexModel, Error> {
-    // TODO: send tracing logs to erlang/elixir _somehow_
-    // tracing_subscriber::fmt::init();
+    // Anything the caller wants visible to getenv() has to be pushed into the
+    // real C environment here. Elixir's System.put_env cannot do it: since
+    // OTP 21 os:putenv writes Erlang's own environment table and leaves the
+    // process `environ` untouched, so neither this crate nor - more importantly
+    // - the QNN libraries' own getenv("DSP_LIBRARY_PATH") ever saw it. That is
+    // exactly how a QNN session configured from Elixir ended up loading the
+    // wrong backend and running silently on the CPU.
+    for (key, value) in &qnn_opts {
+        if let Some(var) = key.strip_prefix("env.") {
+            unsafe { std::env::set_var(var, value) };
+        }
+    }
+
+    init_tracing_from(&qnn_opts);
 
     let builder = Session::builder()?
         .with_optimization_level(map_opt_level(opt))?
@@ -53,10 +110,13 @@ pub fn init(
     // silent CPU fallback - a QNN session that quietly runs on CPU looks
     // identical to a working one apart from being slower.
     let builder = if use_qnn {
-        crate::utils::register_qnn_library().map_err(Error::new)?;
+        let provider_path = lookup(&qnn_opts, "provider_path")
+            .unwrap_or_else(crate::utils::qnn_provider_path);
+        crate::utils::register_qnn_library(&provider_path).map_err(Error::new)?;
 
         let env = ort::environment::current()?;
-        let backend_path = crate::utils::qnn_backend_path();
+        let backend_path = lookup(&qnn_opts, "backend_path")
+            .unwrap_or_else(crate::utils::qnn_backend_path);
 
         let devices: Vec<_> = env
             .devices()
@@ -70,7 +130,7 @@ pub fn init(
                 .collect();
             return Err(Error::new(format!(
                 "no QNN device found after registering {}; devices seen: [{}]; backend {}",
-                crate::utils::qnn_provider_path(),
+                provider_path,
                 available.join(", "),
                 backend_path
             )));
@@ -86,11 +146,39 @@ pub fn init(
             .map(|s| s.to_string())
             .unwrap_or_else(|_| "QNNExecutionProvider".to_string());
 
-        let options = vec![
-            (format!("{ep_name}.backend_path"), backend_path.clone()),
-            // Harmless belt-and-braces in case this build keys it unprefixed.
-            ("backend_path".to_string(), backend_path.clone()),
-        ];
+        // Exactly one entry for the backend, prefixed with the EP name. An
+        // additional unprefixed "backend_path" used to be passed here as
+        // belt-and-braces; it is not harmless - with it present QNN takes no
+        // nodes and the graph silently runs on the CPU.
+        let mut options = vec![(format!("{ep_name}.backend_path"), backend_path.clone())];
+
+        // Extra QNN provider options, comma-separated k=v, from ORTEX_QNN_OPTS.
+        // `htp_arch` in particular is effectively required on QCS6490: without
+        // it the EP logs "Unable to get platform info: Failed to get HTP arch",
+        // claims no nodes, and the whole graph silently runs on the CPU at
+        // roughly 1/35th the speed. Others worth knowing:
+        // htp_performance_mode, htp_graph_finalization_optimization_mode,
+        // enable_htp_shared_memory_allocator, profiling_level.
+        for (key, value) in &qnn_opts {
+            if !RESERVED.contains(&key.as_str()) && !key.starts_with("env.") {
+                options.push((format!("{ep_name}.{key}"), value.clone()));
+            }
+        }
+
+        if let Ok(extra) = std::env::var("ORTEX_QNN_OPTS") {
+            for kv in extra.split(',').filter(|s| !s.trim().is_empty()) {
+                match kv.split_once('=') {
+                    Some((k, v)) => {
+                        options.push((format!("{ep_name}.{}", k.trim()), v.trim().to_string()))
+                    }
+                    None => {
+                        return Err(Error::new(format!(
+                            "ORTEX_QNN_OPTS entry {kv:?} is not k=v"
+                        )))
+                    }
+                }
+            }
+        }
 
         builder.with_devices(devices, Some(&options))?
     } else {
