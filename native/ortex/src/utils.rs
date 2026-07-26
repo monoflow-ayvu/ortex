@@ -102,9 +102,48 @@ pub fn map_eps(env: rustler::env::Env, eps: Vec<Atom>) -> Vec<ExecutionProviderD
             COREML => ort::CoreMLExecutionProvider::default().build(),
             DIRECTML => ort::DirectMLExecutionProvider::default().build(),
             ROCM => ort::ROCmExecutionProvider::default().build(),
-            _ => ort::CPUExecutionProvider::default().build(),
+            QNN => qnn_ep(),
+            other => {
+                // Previously this silently fell through to CPU, which meant a
+                // typo'd or unsupported EP atom produced working inference with
+                // no acceleration and no error at all. Still fall back (so
+                // behaviour is unchanged for callers) but say so.
+                eprintln!("[ortex] unknown execution provider {other:?}; falling back to CPU");
+                ort::CPUExecutionProvider::default().build()
+            }
         })
         .collect()
+}
+
+/// Build the Qualcomm QNN execution provider.
+///
+/// Configured by environment rather than by the Elixir API, because `map_eps`
+/// only receives bare atoms. Defaults suit the Radxa Dragon Q6A (QCS6490, HTP
+/// v68), where libQnnHtp.so is installed by the qairt-runtime package.
+///
+///   ORTEX_QNN_BACKEND_PATH   default "/usr/lib/libQnnHtp.so"
+///
+/// Note the backend .so is loaded by onnxruntime at session creation, so a
+/// wrong path surfaces as a session error, not a load error here.
+///
+/// Performance mode / profiling are deliberately not wired up: in ort
+/// 2.0.0-rc.8 the `PerformanceMode` enum is not re-exported at the `ort` root
+/// (it lives in the qnn EP module), so naming it here fails to compile. Add it
+/// once the ort dependency is bumped and the path is confirmed.
+fn qnn_ep() -> ExecutionProviderDispatch {
+    let backend_path = std::env::var("ORTEX_QNN_BACKEND_PATH")
+        .unwrap_or_else(|_| "/usr/lib/libQnnHtp.so".to_string());
+
+    ort::QNNExecutionProvider::default()
+        .with_backend_path(backend_path)
+        .build()
+        // Without this, ort's apply_execution_providers() logs the registration
+        // failure via `tracing` and returns Ok(()), so onnxruntime quietly falls
+        // back to CPU: you get correct numbers and no error, which is
+        // indistinguishable from working acceleration. ortex also has its
+        // tracing_subscriber init commented out, so the log goes nowhere.
+        // Fail loudly instead - a QNN session that can't use QNN is a bug.
+        .error_on_failure()
 }
 
 /// Take an optimization level and returns the

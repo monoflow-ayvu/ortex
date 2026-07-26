@@ -11,12 +11,28 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.29.0"
-ort = { version = "2.0.0-rc.8" }
+# default-features would enable `download-binaries`, which fetches a prebuilt
+# libonnxruntime for the HOST arch - useless when cross-compiling to aarch64,
+# and it drags a TLS/HTTP stack into the build. `load-dynamic` instead makes ort
+# dlopen() libonnxruntime at runtime from ORT_DYLIB_PATH, so we ship our own
+# (nerves_system_dragon_q6a's onnxruntime-qnn package: /usr/lib/libonnxruntime.so).
+# `ndarray` and `half` are the two default features ortex actually relies on.
+ort = { version = "2.0.0-rc.8", default-features = false, features = [
+	"load-dynamic",
+	"ndarray",
+	"half",
+] }
 ndarray = "0.16.1"
 half = "2.2.1"
 tracing-subscriber = { version = "0.3", features = [ "env-filter", "fmt" ] }
 num-traits = "0.2.15"
-rustls = "0.22.4"
+# `rustls` was a direct dependency only so that ort's `download-binaries`
+# feature had a TLS stack to fetch prebuilt libonnxruntime archives. Nothing in
+# ortex's own source references it, and we build with `load-dynamic` instead, so
+# it is dropped. This also removes `ring` from the tree - a C-heavy transitive
+# dep whose build script compiles host C with `cc`, which breaks under Nerves
+# (Nerves exports CC=<cross>-gcc, so an x86 host build gets fed `-m64` and dies
+# with "unrecognized command-line option '-m64'").
 
 [features]
 # ONNXRuntime Execution providers
