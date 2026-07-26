@@ -11,10 +11,10 @@ use rustler::{Atom, Env, Error as RustlerError, NifResult, ResourceArc};
 use ort::execution_providers::{
     ACLExecutionProvider, CPUExecutionProvider, CUDAExecutionProvider, CoreMLExecutionProvider,
     DirectMLExecutionProvider, ExecutionProviderDispatch, OneDNNExecutionProvider,
-    ROCmExecutionProvider, TensorRTExecutionProvider,
+    QNNExecutionProvider, ROCmExecutionProvider, TensorRTExecutionProvider,
 };
 use ort::session::builder::GraphOptimizationLevel;
-use ort::tensor::TensorElementType;
+use ort::value::TensorElementType;
 use ort::value::ValueType;
 
 fn element_count(shape: &[usize]) -> Result<usize, String> {
@@ -157,11 +157,33 @@ pub fn to_binary<'a>(
 }
 
 /// Takes a vec of Atoms and transforms them into a vec of ExecutionProvider Enums
+/// True if `:qnn` is among the requested providers.
+///
+/// QNN cannot go through `map_eps`: on upstream ONNX Runtime builds it is a
+/// *plugin* execution provider, which is selected with the V2 device API
+/// (`SessionBuilder::with_devices`) rather than by appending an
+/// `ExecutionProviderDispatch`. `model::init` handles it separately, so it is
+/// filtered out of the dispatch list here.
+pub fn wants_qnn(env: rustler::env::Env, eps: &[Atom]) -> bool {
+    eps.iter().any(|e| {
+        e.to_term(env)
+            .atom_to_string()
+            .map(|s| s == QNN)
+            .unwrap_or(false)
+    })
+}
+
 pub fn map_eps(
     env: rustler::env::Env,
     eps: Vec<Atom>,
 ) -> Result<Vec<ExecutionProviderDispatch>, String> {
     eps.iter()
+        .filter(|e| {
+            e.to_term(env)
+                .atom_to_string()
+                .map(|s| s != QNN)
+                .unwrap_or(true)
+        })
         .map(|e| {
             let atom_str = e
                 .to_term(env)
@@ -180,13 +202,61 @@ pub fn map_eps(
                     "Unknown execution provider: {}. Expected one of: {}",
                     atom_str,
                     vec![
-                        CPU, CUDA, TENSORRT, ACL, ONEDNN, "dnnl", COREML, DIRECTML, ROCM
+                        CPU, CUDA, TENSORRT, ACL, ONEDNN, "dnnl", COREML, DIRECTML, ROCM, QNN
                     ]
                     .join(", ")
                 )),
             }
         })
         .collect()
+}
+
+/// Register the Qualcomm QNN *plugin* execution provider library, once.
+///
+/// Upstream `libonnxruntime.so` is NOT built with `--use_qnn`, so appending
+/// "QNN" by name fails with "QNN execution provider is not supported in this
+/// build." QNN ships as a plugin EP (`libonnxruntime_providers_qnn.so`) which
+/// must be registered with the environment (ORT >= 1.23
+/// `RegisterExecutionProviderLibrary`) and then selected via the V2 device API,
+/// `SessionBuilder::with_devices` - NOT via ExecutionProviderDispatch.
+///
+///   ORTEX_QNN_PROVIDER_PATH  plugin EP library
+///                            (default /usr/lib/libonnxruntime_providers_qnn.so)
+///   ORTEX_QNN_BACKEND_PATH   backend the EP loads
+///                            (default /usr/lib/libQnnHtp.so)
+pub fn register_qnn_library() -> Result<(), String> {
+    static REGISTERED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+
+    REGISTERED
+        .get_or_init(|| {
+            let provider = qnn_provider_path();
+            if !std::path::Path::new(&provider).exists() {
+                return Err(format!("QNN plugin EP library not found at {provider}"));
+            }
+
+            let env = ort::environment::current()
+                .map_err(|e| format!("could not get ONNX Runtime environment: {e}"))?;
+
+            match env.register_ep_library("QNN", &provider) {
+                Ok(lib) => {
+                    // Leak: unregistering would invalidate live sessions, and the
+                    // EP must remain available for the process lifetime.
+                    std::mem::forget(lib);
+                    Ok(())
+                }
+                Err(e) => Err(format!("failed to register QNN plugin EP from {provider}: {e}"))
+            }
+        })
+        .clone()
+}
+
+pub fn qnn_provider_path() -> String {
+    std::env::var("ORTEX_QNN_PROVIDER_PATH")
+        .unwrap_or_else(|_| "/usr/lib/libonnxruntime_providers_qnn.so".to_string())
+}
+
+pub fn qnn_backend_path() -> String {
+    std::env::var("ORTEX_QNN_BACKEND_PATH").unwrap_or_else(|_| "/usr/lib/libQnnHtp.so".to_string())
 }
 
 /// Take an optimization level and returns the

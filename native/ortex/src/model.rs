@@ -36,15 +36,69 @@ impl std::panic::UnwindSafe for OrtexModel {}
 pub fn init(
     model_path: String,
     eps: Vec<ExecutionProviderDispatch>,
+    use_qnn: bool,
     opt: i32,
 ) -> Result<OrtexModel, Error> {
     // TODO: send tracing logs to erlang/elixir _somehow_
     // tracing_subscriber::fmt::init();
 
-    let session = Session::builder()?
+    let builder = Session::builder()?
         .with_optimization_level(map_opt_level(opt))?
-        .with_execution_providers(eps)?
-        .commit_from_file(model_path)?;
+        .with_execution_providers(eps)?;
+
+    // QNN is a *plugin* EP on upstream ONNX Runtime builds: it has to be
+    // registered with the environment and then selected via the V2 device API,
+    // not appended by name (which fails with "QNN execution provider is not
+    // supported in this build."). Every failure here is an error rather than a
+    // silent CPU fallback - a QNN session that quietly runs on CPU looks
+    // identical to a working one apart from being slower.
+    let builder = if use_qnn {
+        crate::utils::register_qnn_library().map_err(Error::new)?;
+
+        let env = ort::environment::current()?;
+        let backend_path = crate::utils::qnn_backend_path();
+
+        let devices: Vec<_> = env
+            .devices()
+            .filter(|d| d.ep().map(|ep| ep.contains("QNN")).unwrap_or(false))
+            .collect();
+
+        if devices.is_empty() {
+            let available: Vec<String> = env
+                .devices()
+                .map(|d| d.ep().unwrap_or("<unknown>").to_string())
+                .collect();
+            return Err(Error::new(format!(
+                "no QNN device found after registering {}; devices seen: [{}]; backend {}",
+                crate::utils::qnn_provider_path(),
+                available.join(", "),
+                backend_path
+            )));
+        }
+
+        // Provider options for with_devices() must be prefixed with the EP name,
+        // e.g. "QNNExecutionProvider.backend_path" - ort's own doc example uses
+        // "CPUExecutionProvider.use_arena". A bare "backend_path" is silently
+        // ignored, and without a backend the EP loads but claims no nodes, so
+        // everything runs on CPU while libQnnHtp.so is never even mapped.
+        let ep_name = devices[0]
+            .ep()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| "QNNExecutionProvider".to_string());
+
+        let options = vec![
+            (format!("{ep_name}.backend_path"), backend_path.clone()),
+            // Harmless belt-and-braces in case this build keys it unprefixed.
+            ("backend_path".to_string(), backend_path.clone()),
+        ];
+
+        builder.with_devices(devices, Some(&options))?
+    } else {
+        builder
+    };
+
+    let mut builder = builder;
+    let session = builder.commit_from_file(model_path)?;
 
     let state = OrtexModel {
         session: Mutex::new(session),

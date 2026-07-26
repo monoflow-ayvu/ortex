@@ -6,6 +6,9 @@ pub const ONEDNN: &str = "onednn";
 pub const COREML: &str = "coreml";
 pub const DIRECTML: &str = "directml";
 pub const ROCM: &str = "rocm";
+/// Qualcomm QNN (Hexagon HTP / NPU). Unlike the other providers this one is a
+/// *plugin* EP on upstream builds: see `utils::qnn_ep`.
+pub const QNN: &str = "qnn";
 
 pub mod ortex_atoms {
     rustler::atoms! {
@@ -18,6 +21,6 @@ pub mod ortex_atoms {
         s, u, f, bf, c,
         // Execution provider atoms
         cpu, cuda, tensorrt, acl, dnnl,
-        onednn, coreml, directml, rocm
+        onednn, coreml, directml, rocm, qnn
     }
 }

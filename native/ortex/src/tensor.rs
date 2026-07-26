@@ -3,7 +3,7 @@ use core::convert::TryFrom;
 use ndarray::prelude::*;
 use ndarray::{ArrayBase, ArrayView, Data, IxDyn, IxDynImpl, ViewRepr};
 use ort::session::SessionInputValue;
-use ort::tensor::TensorElementType;
+use ort::value::TensorElementType;
 use ort::value::{Tensor, Value, ValueType};
 use ort::Error;
 use rustler::{Atom, Error as RustlerError, Resource, ResourceArc};

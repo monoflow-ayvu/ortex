@@ -11,7 +11,28 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.37.1"
-ort = { version = "2.0.0-rc.11", features = ["half"] }
+# rc.12 (not rc.11) is required for Environment::register_ep_library, i.e. the
+# ORT >= 1.23 plugin-execution-provider API. That is the only way to use the
+# Qualcomm QNN EP with an upstream libonnxruntime: the stock build is not
+# compiled with --use_qnn, so appending "QNN" by name alone fails with
+# "QNN execution provider is not supported in this build."
+#
+# default-features are off deliberately:
+#   * download-binaries would fetch a HOST-arch libonnxruntime, useless when
+#     cross-compiling to aarch64, and drags in a TLS stack (ring), whose build
+#     script compiles host C with Nerves' cross CC and dies on `-m64`.
+#   * load-dynamic makes ort dlopen() libonnxruntime from ORT_DYLIB_PATH, so we
+#     use the one the nerves system installs at /usr/lib/libonnxruntime.so.
+#   * api-24 implies api-22, which is what gates register_ep_library.
+#   * load-dynamic also satisfies the cfg gate on QNN::register().
+ort = { version = "2.0.0-rc.12", default-features = false, features = [
+	"std",
+	"ndarray",
+	"half",
+	"tracing",
+	"load-dynamic",
+	"api-24",
+] }
 ndarray = "0.17.2"
 half = "2.2.1"
 
