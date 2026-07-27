@@ -22,3 +22,7 @@ ortex_features =
   end
 
 config :ortex, Ortex.Native, features: ortex_features
+
+# Ortex itself always compiles the crate from source; precompiled artifacts are for
+# projects that depend on ortex.
+config :rustler_precompiled, :force_build, ortex: true

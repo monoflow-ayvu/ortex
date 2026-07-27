@@ -1,33 +1,17 @@
 defmodule Ortex.Native do
   @moduledoc false
 
-  env_flag? = fn name -> String.downcase(System.get_env(name, "")) in ~w(1 true yes on) end
-
-  # We have to compile the crate before `use Rustler` compiles the crate since
-  # cargo downloads the onnxruntime shared libraries and they are not available
-  # to load or copy into Elixir's during the on_load or Elixir compile steps.
-  # In the future, this may be configurable in Rustler.
-  if not env_flag?.("ORTEX_SKIP_COMPILE") do
-    if env_flag?.("ORTEX_SKIP_DOWNLOAD"), do: System.put_env("ORT_SKIP_DOWNLOAD", "1")
-
-    rustler_version = Application.spec(:rustler, :vsn) |> to_string() |> Version.parse!()
-
-    if Version.compare(rustler_version, "0.30.0") in [:gt, :eq] do
-      Rustler.Compiler.compile_crate(:ortex, Application.compile_env(:ortex, __MODULE__, []),
-        otp_app: :ortex,
-        crate: :ortex
-      )
-    else
-      Rustler.Compiler.compile_crate(__MODULE__, otp_app: :ortex, crate: :ortex)
-    end
-  end
-
   Ortex.Util.copy_ort_libs()
 
-  use Rustler,
+  version = Mix.Project.config()[:version]
+
+  use RustlerPrecompiled,
     otp_app: :ortex,
     crate: :ortex,
-    skip_compilation?: true
+    base_url: "https://github.com/monoflow-ayvu/ortex/releases/download/v#{version}",
+    version: version,
+    targets: ~w(aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu),
+    nif_versions: ~w(2.15)
 
   # When loading a NIF module, dummy clauses for all NIF function are required.
   # NIF dummies usually just error out when called when the NIF is not loaded, as that should never normally happen.

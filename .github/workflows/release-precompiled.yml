@@ -1,0 +1,146 @@
+name: Release Precompiled NIF
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "checksum-*.exs"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: precompiled-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      release_needed: ${{ steps.resolve.outputs.release_needed }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Resolve version and check tag
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -Po '^\s*version: "\K[^"]+' mix.exs | head -n1)"
+          crate_version="$(grep -Po '^version = "\K[^"]+' native/ortex/Cargo.toml | head -n1)"
+          if [ -z "${version}" ]; then
+            echo "could not read version from mix.exs"
+            exit 1
+          fi
+          if [ "${version}" != "${crate_version}" ]; then
+            echo "version mismatch: mix.exs=${version} Cargo.toml=${crate_version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
+            echo "v${version} already released; nothing to do"
+            echo "release_needed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "release_needed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+  build:
+    needs: version
+    if: needs.version.outputs.release_needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/ortex
+      - name: Build NIF
+        working-directory: native/ortex
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package artifact
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          lib="libortex-v${VERSION}-nif-2.15-${TARGET}"
+          so="native/ortex/target/${TARGET}/release/libortex.so"
+          file "${so}"
+          mkdir -p dist
+          cp "${so}" "dist/${lib}.so"
+          tar -czf "dist/${lib}.so.tar.gz" -C dist "${lib}.so"
+          rm "dist/${lib}.so"
+          [ "$(tar -tzf dist/${lib}.so.tar.gz)" = "${lib}.so" ]
+          sha256sum "dist/${lib}.so.tar.gz" | awk '{print $1}' > "dist/${lib}.so.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nif-${{ matrix.target }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nif-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksum-Elixir.Ortex.Native.exs
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, hashlib, os
+          version = os.environ["VERSION"]
+          paths = sorted(glob.glob(f"dist/*-v{version}-*.so.tar.gz"))
+          if not paths:
+              raise SystemExit(f"no artifacts matching dist/*-v{version}-*.so.tar.gz")
+          with open("checksum-Elixir.Ortex.Native.exs", "w") as f:
+              f.write("%{\n")
+              for path in paths:
+                  digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+                  f.write(f'  "{os.path.basename(path)}" => "sha256:{digest}",\n')
+              f.write("}\n")
+          PY
+          cat checksum-Elixir.Ortex.Native.exs
+      - name: Commit checksum and tag
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add checksum-Elixir.Ortex.Native.exs
+          git commit -m "checksum: precompiled NIFs for v${VERSION}"
+          git push origin HEAD:main
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.version.outputs.version }}
+          files: |
+            dist/*.so.tar.gz
+            dist/*.so.tar.gz.sha256
+            checksum-Elixir.Ortex.Native.exs
+          fail_on_unmatched_files: true
