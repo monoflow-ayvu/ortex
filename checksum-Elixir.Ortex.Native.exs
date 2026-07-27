@@ -1,4 +1,4 @@
 %{
-  "libortex-v0.2.0-rc.1-nif-2.15-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:12e8b68d18f3d6f5c2e24ceea13513db624259d79bd0deb41e0e81ed49306039",
-  "libortex-v0.2.0-rc.1-nif-2.15-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:570cb945798a7283f2ff0707540657fed77121fb9be9bdc3caafa92bac12a5a2",
+  "libortex-v0.2.0-rc.2-nif-2.15-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:2f56a7805caa0372660a8d84a4ee20e490dd8b8a574db8a565956df38b4eed51",
+  "libortex-v0.2.0-rc.2-nif-2.15-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:fbc2de44a39ac9d2f1aee01e1021292dfcd56f75aa98ac91af5a9071007322c9",
 }
