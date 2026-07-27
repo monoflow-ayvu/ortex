@@ -31,7 +31,29 @@ pub type IoSpec = Vec<(String, String, Option<Vec<i64>>)>;
 
 /// Keys in `qnn_opts` that configure ortex itself rather than the QNN EP, and
 /// so must not be forwarded to onnxruntime as provider options.
-const RESERVED: &[&str] = &["backend_path", "provider_path", "trace_path"];
+const RESERVED: &[&str] = &[
+    "backend_path",
+    "provider_path",
+    "trace_path",
+    "intra_threads",
+    "inter_threads",
+    "intra_op_spinning",
+    "inter_op_spinning",
+];
+
+fn parse_usize(key: &str, value: &str) -> Result<usize, Error> {
+    value
+        .parse()
+        .map_err(|_| Error::new(format!("{key} must be a non-negative integer, got {value:?}")))
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
+    match value {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(Error::new(format!("{key} must be a boolean, got {other:?}")))
+    }
+}
 
 fn lookup(opts: &[(String, String)], key: &str) -> Option<String> {
     opts.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
@@ -152,9 +174,31 @@ pub fn init(
 
     init_tracing(&qnn_opts);
 
-    let builder = Session::builder()?
+    let mut builder = Session::builder()?
         .with_optimization_level(map_opt_level(opt))?
         .with_execution_providers(eps)?;
+
+    // Thread-pool shape. This matters far more than it looks on an accelerator:
+    // onnxruntime's intra-op pool descends from Eigen's non-blocking pool, built for
+    // CPU graphs of hundreds of few-microsecond kernels where a futex wake (~5-50us)
+    // would cost more than the kernel itself, so its workers SPIN before parking.
+    // When the whole graph is one offloaded EP node that takes ~32ms, those workers
+    // spin for the entire inference with nothing to do. Measured on a Dragon Q6A:
+    // ~6 ARM cores at 100%, cpu0 at 89degC, the cpufreq cooling state pinned at 9/9,
+    // and throughput decaying 24 -> 20.6 fps as the package throttled - heat produced
+    // by threads doing no work, throttling the NPU that was doing the work.
+    //
+    //   intra_threads=1      run the node on the calling thread; no pool, no spin
+    //   intra_op_spinning=0  keep the pool but park immediately instead of spinning
+    for (key, value) in &qnn_opts {
+        builder = match key.as_str() {
+            "intra_threads" => builder.with_intra_threads(parse_usize(key, value)?)?,
+            "inter_threads" => builder.with_inter_threads(parse_usize(key, value)?)?,
+            "intra_op_spinning" => builder.with_intra_op_spinning(parse_bool(key, value)?)?,
+            "inter_op_spinning" => builder.with_inter_op_spinning(parse_bool(key, value)?)?,
+            _ => builder
+        };
+    }
 
     let mut builder = if use_qnn {
         with_qnn(builder, &qnn_opts)?
