@@ -81,15 +81,27 @@ needs no feature flag. See `Ortex.load/4` for its options.
 
 ## Packaging and Offline Builds
 
-`ORTEX_SKIP_COMPILE=1` skips building the Rust crate, for packaging against a precompiled
-NIF. That NIF and the `libonnxruntime` it needs must already be in `priv/native` for the
-target platform.
+On `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu` (including Nerves targets),
+ortex downloads a precompiled NIF from the GitHub release matching its version; no Rust
+toolchain is needed. On any other platform the crate builds from source, which requires
+Rust.
+
+To force a source build, add this to the consuming project's config:
+
+```elixir
+config :rustler_precompiled, :force_build, ortex: true
+```
+
+or set `RUSTLER_PRECOMPILED_FORCE_BUILD_ALL=1` in the environment.
 
 To build against an ONNX Runtime that is already installed:
 
 ```sh
-ORTEX_SKIP_DOWNLOAD=1 \
 ORT_PREFER_DYNAMIC_LINK=1 \
 ORT_LIB_LOCATION=/path/to/onnxruntime/lib \
 mix compile
 ```
+
+Releases: bump `version` in both `mix.exs` and `native/ortex/Cargo.toml`, then push to
+`main`. The `Release Precompiled NIF` workflow tags `v<version>` and attaches the
+precompiled artifacts.

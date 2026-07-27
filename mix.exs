@@ -31,7 +31,8 @@ defmodule Ortex.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, "~> 0.37"},
+      {:rustler, "~> 0.37", optional: true},
+      {:rustler_precompiled, "~> 0.8"},
       {:nx, "~> 0.10"},
       {:tokenizers, "~> 0.5", only: :dev},
       {:ex_doc, "0.29.4", only: :dev, runtime: false},
@@ -43,7 +44,8 @@ defmodule Ortex.MixProject do
   defp package do
     [
       files: ~w(lib .formatter.exs mix.exs README* LICENSE* native/ortex/src/ config/config.exs
-        native/ortex/Cargo.lock native/ortex/Cargo.toml native/ortex/.cargo/config.toml),
+        native/ortex/Cargo.lock native/ortex/Cargo.toml native/ortex/.cargo/config.toml
+        checksum-*.exs),
       licenses: ["MIT"],
       links: %{"GitHub" => "https://github.com/elixir-nx/ortex"},
       description: "ONNX Runtime bindings for Elixir"
