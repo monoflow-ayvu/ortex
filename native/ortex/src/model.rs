@@ -5,7 +5,7 @@ use crate::tensor::OrtexTensor;
 use crate::utils::{is_bool_input, map_opt_level};
 use std::convert::TryInto;
 use std::iter::zip;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use ort::execution_providers::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
@@ -59,33 +59,70 @@ fn lookup(opts: &[(String, String)], key: &str) -> Option<String> {
     opts.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
 }
 
-/// Sends ort's `tracing` output, and onnxruntime's own VERBOSE log, to `trace_path`
-/// (or `$ORTEX_TRACE`). A NIF's stdout goes to the Nerves console rather than to the
-/// caller, so a file is the only way to read EP registration, device selection and
-/// per-node placement remotely. Filter with RUST_LOG.
-fn init_tracing(qnn_opts: &[(String, String)]) {
-    static ONCE: OnceLock<()> = OnceLock::new();
+/// Destination for ort's `tracing` output and onnxruntime's own VERBOSE log.
+///
+/// The file is swappable, the subscriber is not: `tracing` allows one global subscriber
+/// per process, so installing it around a fixed writer means the first session to run
+/// wins and every later `trace_path` is silently ignored.
+static TRACE_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
-    let path = lookup(qnn_opts, "trace_path").or_else(|| std::env::var("ORTEX_TRACE").ok());
+struct TraceWriter;
 
-    ONCE.get_or_init(|| {
-        let Some(file) = path.and_then(|path| std::fs::File::create(path).ok()) else {
-            return;
-        };
-
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "debug".into());
-
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(Mutex::new(file))
-            .with_ansi(false)
-            .try_init();
-
-        if let Ok(env) = ort::environment::current() {
-            env.set_log_level(ort::logging::LogLevel::Verbose);
+impl std::io::Write for TraceWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            Some(file) => file.write(buf),
+            // The subscriber outlives any one trace request; with no file set there is
+            // nowhere to put this.
+            None => Ok(buf.len())
         }
-    });
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(())
+        }
+    }
+}
+
+fn tracing_requested(qnn_opts: &[(String, String)]) -> bool {
+    lookup(qnn_opts, "trace_path").is_some() || std::env::var("ORTEX_TRACE").is_ok()
+}
+
+/// Points tracing at `trace_path` (or `$ORTEX_TRACE`). A NIF's stdout goes to the Nerves
+/// console rather than to the caller, so a file is the only way to read EP registration,
+/// device selection and per-node placement remotely. Filter with RUST_LOG.
+fn init_tracing(qnn_opts: &[(String, String)]) {
+    let Some(path) = lookup(qnn_opts, "trace_path").or_else(|| std::env::var("ORTEX_TRACE").ok())
+    else {
+        return;
+    };
+
+    let file = match std::fs::File::create(&path) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("ortex: could not open trace file {path}: {e}");
+            return;
+        }
+    };
+    *TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "debug".into());
+
+    // Harmless once a subscriber exists - see TRACE_FILE.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(|| TraceWriter)
+        .with_ansi(false)
+        .try_init();
+
+    // Raise onnxruntime's own log level too - the node-placement report, which is
+    // what tells you whether QNN claimed the graph, is only emitted at VERBOSE.
+    if let Ok(env) = ort::environment::current() {
+        env.set_log_level(ort::logging::LogLevel::Verbose);
+    }
 }
 
 /// QNN is a *plugin* EP on upstream ONNX Runtime builds: it has to be registered with
@@ -154,8 +191,6 @@ fn with_qnn(
     Ok(builder.with_devices(devices, Some(&options))?)
 }
 
-/// Creates a model given the path to the model and vector of execution providers.
-/// The execution providers are Atoms from Erlang/Elixir.
 pub fn init(
     model_path: String,
     eps: Vec<ExecutionProviderDispatch>,
@@ -177,6 +212,15 @@ pub fn init(
     let mut builder = Session::builder()?
         .with_optimization_level(map_opt_level(opt))?
         .with_execution_providers(eps)?;
+
+    // Raising the *environment* log level is not enough to get the node-placement
+    // report - the one line that answers "did QNN actually claim this graph". That
+    // is logged through the session logger, so the session's own severity has to be
+    // lowered too. Tie it to the trace request: asking for a trace means asking for
+    // the diagnosis.
+    if tracing_requested(&qnn_opts) {
+        builder = builder.with_log_level(ort::logging::LogLevel::Verbose)?;
+    }
 
     // Thread-pool shape. This matters far more than it looks on an accelerator:
     // onnxruntime's intra-op pool descends from Eigen's non-blocking pool, built for
