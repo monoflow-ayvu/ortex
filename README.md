@@ -63,6 +63,12 @@ end
 
 You will need [Rust](https://www.rust-lang.org/tools/install) for compilation to succeed.
 
+At runtime the NIF `dlopen()`s `libonnxruntime` (ort's `load-dynamic` feature), so the
+shared library must be present on the target. Either set `ORT_DYLIB_PATH` to the library
+path at runtime, or set `ORT_LIB_LOCATION` at compile time to have it copied into
+`priv/native` (where the `$ORIGIN` rpath finds it). Nerves system images provide it
+system-wide. Model loads without it fail; tests need it too.
+
 ## Execution Providers
 
 Non-CPU execution providers are compiled in through `ort`'s cargo features. The default

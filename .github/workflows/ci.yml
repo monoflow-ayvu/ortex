@@ -19,6 +19,13 @@ jobs:
         with:
           otp-version: ${{ matrix.otp }}
           elixir-version: ${{ matrix.elixir }}
+      # The crate dlopen()s libonnxruntime at runtime (ort `load-dynamic`, see
+      # native/ortex/Cargo.toml); nothing else provides it on the runner. Pin tracks
+      # the `api-24` feature.
+      - name: Install ONNX Runtime
+        run: |
+          curl -sSL https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz | tar -xz
+          echo "ORT_DYLIB_PATH=$GITHUB_WORKSPACE/onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: mix deps.get
       - name: Compile and check warnings
@@ -39,6 +46,10 @@ jobs:
         run: |
           brew update
           brew install erlang@27 elixir
+      - name: Install ONNX Runtime
+        run: |
+          curl -sSL https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-osx-arm64-1.24.4.tgz | tar -xz
+          echo "ORT_DYLIB_PATH=$GITHUB_WORKSPACE/onnxruntime-osx-arm64-1.24.4/lib/libonnxruntime.dylib" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: mix deps.get
       - name: Compile and check warnings
