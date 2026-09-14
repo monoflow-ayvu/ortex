@@ -10,7 +10,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = "0.37.1"
+rustler = "0.38.0"
 # rc.12, not rc.11, is the first release with Environment::register_ep_library - the
 # ORT >= 1.23 plugin-EP API, and the only way to reach the Qualcomm QNN EP through an
 # upstream libonnxruntime, which is not built with --use_qnn and so rejects "QNN" by
