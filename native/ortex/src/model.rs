@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
-use ort::session::{Session, SessionInputValue, SessionInputs};
+use ort::session::{RunOptions, Session, SessionInputValue, SessionInputs};
 use ort::value::{Outlet, TensorElementType, ValueType};
 use rustler::{Atom, Resource, ResourceArc};
 
@@ -532,6 +532,16 @@ fn validate_input(outlet: &Outlet, tensor: &OrtexTensor) -> Result<(), OrtexErro
     Ok(())
 }
 
+/// Named inputs as the map ONNX Runtime matches by name.
+fn value_map<'a>(
+    values: Vec<(String, SessionInputValue<'a>)>,
+) -> Vec<(std::borrow::Cow<'a, str>, SessionInputValue<'a>)> {
+    values
+        .into_iter()
+        .map(|(name, value)| (std::borrow::Cow::Owned(name), value))
+        .collect()
+}
+
 /// Turns tensors into session values, substituting the bool rewrite where one was made.
 fn convert<'a>(
     tensors: impl Iterator<Item = &'a OrtexTensor>,
@@ -548,7 +558,14 @@ fn convert<'a>(
 
 /// Runs the model with the given inputs. Returns a vector of tensors. Use `model::show`
 /// to see what the model expects for input and output shapes.
-pub fn run(model: ResourceArc<OrtexModel>, inputs: Inputs) -> Result<Vec<RunOutput>, OrtexError> {
+///
+/// `options` is the cancellation handle from `Ortex.RunOptions.new/1`, if the caller made
+/// one: with it, another process can terminate a run that is stuck in a driver or an NPU.
+pub fn run(
+    model: ResourceArc<OrtexModel>,
+    inputs: Inputs,
+    options: Option<&RunOptions>,
+) -> Result<Vec<RunOutput>, OrtexError> {
     let mut session = acquire(&model.sessions, &model.next);
 
     let output_names: Vec<String> = session
@@ -635,14 +652,16 @@ pub fn run(model: ResourceArc<OrtexModel>, inputs: Inputs) -> Result<Vec<RunOutp
         }
     };
 
-    let mut outputs = match ort_inputs {
-        OrtInputs::Positional(values) => session.run(&values[..])?,
-        OrtInputs::Named(values) => {
-            let pairs: Vec<(std::borrow::Cow<'_, str>, SessionInputValue<'_>)> = values
-                .into_iter()
-                .map(|(name, value)| (std::borrow::Cow::Owned(name), value))
-                .collect();
-            session.run::<0>(SessionInputs::ValueMap(pairs))?
+    let mut outputs = match (options, ort_inputs) {
+        (Some(options), OrtInputs::Positional(values)) => {
+            session.run_with_options::<_, 0>(&values[..], options)?
+        }
+        (Some(options), OrtInputs::Named(values)) => {
+            session.run_with_options::<_, 0>(SessionInputs::ValueMap(value_map(values)), options)?
+        }
+        (None, OrtInputs::Positional(values)) => session.run(&values[..])?,
+        (None, OrtInputs::Named(values)) => {
+            session.run::<0>(SessionInputs::ValueMap(value_map(values)))?
         }
     };
 

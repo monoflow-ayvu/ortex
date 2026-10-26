@@ -119,6 +119,23 @@ defmodule Ortex do
   Raises `Ortex.Error` when the tensors do not fit the model (`:invalid_input`, naming the
   input, axis and both shapes) or ONNX Runtime refuses the run (`:onnxruntime`).
 
+  ## Cancellation
+
+  An inference that never returns (a wedged driver, an NPU in a bad state) holds its
+  session, and with `sessions: 1` every later inference on that model queues behind it. Pass
+  a handle from `Ortex.RunOptions.new/1` to be able to stop it from another process:
+
+  ```elixir
+  options = Ortex.RunOptions.new(tag: "request-42")
+  Ortex.run(model, inputs, run_options: options)
+
+  # from a timeout, a supervisor, a cancellation request:
+  Ortex.RunOptions.terminate(options)
+  ```
+
+  The run stops at the next node boundary and raises `Ortex.Error` with reason
+  `:onnxruntime`.
+
   ## Examples
 
       iex> model = Ortex.load!("./models/tinymodel.onnx")
@@ -132,6 +149,7 @@ defmodule Ortex do
 
   """
   defdelegate run(model, tensors), to: Ortex.Model
+  defdelegate run(model, tensors, opts), to: Ortex.Model
 
   @doc """
   Bytes of tensor data currently held by live Ortex tensors.

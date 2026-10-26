@@ -70,6 +70,23 @@ model = Ortex.load!("./models/resnet50.onnx", [:cpu], 3, sessions: 4)
 
 Each pooled session loads the graph and its own thread pools, so N is bounded by memory.
 
+### Cancellation
+
+A run that never returns holds its session, and with the default `sessions: 1` every later
+inference on that model queues behind it. A handle from `Ortex.RunOptions` lets another
+process stop it:
+
+```elixir
+options = Ortex.RunOptions.new(tag: "request-42")
+Ortex.run(model, inputs, run_options: options)
+
+Ortex.RunOptions.terminate(options)  # from a timeout or a cancellation request
+```
+
+`terminate/1` returns immediately and ONNX Runtime stops the graph at the next node
+boundary; the run raises `Ortex.Error` with reason `:onnxruntime`. `unterminate/1` resets
+the flag, and one handle used by several runs terminates all of them.
+
 ## Installation
 
 `Ortex` can be installed by adding `ortex` to your list of dependencies in `mix.exs`:
