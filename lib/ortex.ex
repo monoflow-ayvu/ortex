@@ -24,6 +24,12 @@ defmodule Ortex do
   regardless: the first writes an ORT trace, the second exports `NAME` into the OS
   environment, the only way QNN's own `getenv` calls can see it.
 
+  `sessions: N` loads N copies of the same graph into the model. An ONNX Runtime session is
+  exclusive - `Session::run` takes `&mut self` - so with the default of 1 every inference on
+  the model is serialised, and `Nx.Serving` partitions/batch_size only queue work. Set
+  `sessions:` above 1 when concurrent inferences have to overlap. Each pooled session loads
+  the graph and its thread pools again, so the extra memory is proportional to N.
+
   When `:qnn` is among `eps`, the thread pool defaults assume the graph is one offloaded NPU
   node: `intra_threads: 1` and `intra_op_spinning: false`. The default pool's spinning workers
   burn every core while the NPU runs, which measurably throttles the package (24 -> 20.6 fps
@@ -35,6 +41,7 @@ defmodule Ortex do
       iex> Ortex.load("./models/tinymodel.onnx")
       iex> Ortex.load("./models/tinymodel.onnx", [:cuda, :cpu])
       iex> Ortex.load("./models/tinymodel.onnx", [:cpu], 0)
+      iex> Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: 4)
 
   """
   defdelegate load(path, eps \\ [:cpu], opt \\ 3, qnn_opts \\ []), to: Ortex.Model
