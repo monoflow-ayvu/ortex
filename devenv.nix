@@ -1,14 +1,10 @@
-{ inputs, pkgs, ... }:
+{ pkgs, ... }:
 
-let
-  nixpkgs-cmake = import inputs.nixpkgs-cmake { 
-    system = pkgs.stdenv.system; 
-  };
-in
 {
   packages = with pkgs; [
     autoconf
     automake
+    cmake
     curl
     squashfsTools
     pkg-config
