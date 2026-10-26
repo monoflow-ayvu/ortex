@@ -24,6 +24,12 @@ defmodule Ortex do
   regardless: the first writes an ORT trace, the second exports `NAME` into the OS
   environment, the only way QNN's own `getenv` calls can see it.
 
+  When `:qnn` runs, the intra-op thread pool defaults to `intra_threads: 1` and
+  `intra_op_spinning: false`: with the whole graph offloaded to the NPU the CPU pool has
+  nothing to parallelize, and its spinning workers only generate heat - measured on a
+  Dragon Q6A at ~14% throughput loss plus thermal throttling. Pass an explicit
+  `intra_threads`/`intra_op_spinning` in `qnn_opts` to override those defaults.
+
   ## Examples
 
       iex> Ortex.load("./models/tinymodel.onnx")

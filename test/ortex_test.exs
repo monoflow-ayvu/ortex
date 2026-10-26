@@ -41,4 +41,34 @@ defmodule OrtexTest do
     {%Nx.Tensor{shape: {3, 10}}, %Nx.Tensor{shape: {3, 10}}, %Nx.Tensor{shape: {3, 10}}} =
       Nx.Serving.run(serving, batch)
   end
+
+  test "Nx.Serving ignores an app-default defn compiler" do
+    model = Ortex.load("./models/tinymodel.onnx")
+    original_defaults = Nx.Defn.default_options()
+
+    try do
+      Nx.Defn.default_options(Keyword.put(original_defaults, :compiler, EXLA))
+      serving = Nx.Serving.new(Ortex.Serving, model)
+
+      single =
+        {Nx.broadcast(0, {100}) |> Nx.as_type(:s32), Nx.broadcast(0.0, {100}) |> Nx.as_type(:f32)}
+
+      {%Nx.Tensor{shape: {3, 10}}, %Nx.Tensor{shape: {3, 10}}, %Nx.Tensor{shape: {3, 10}}} =
+        Nx.Serving.run(serving, Nx.Batch.stack([single, single, single]))
+    after
+      Nx.Defn.default_options(original_defaults)
+    end
+  end
+
+  test "inspect uses nil for dynamic dimensions and a readable element type" do
+    model = Ortex.load("./models/tinymodel.onnx")
+
+    format = inspect(model)
+
+    assert format =~ ~S({"x", "Int32", [nil, 100]})
+    assert format =~ ~S({"y", "Float32", [nil, 100]})
+    assert format =~ ~S({"output1", "Float32", [nil, 10]})
+    refute format =~ "-1"
+    refute format =~ "Tensor {"
+  end
 end

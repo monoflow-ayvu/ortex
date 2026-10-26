@@ -60,8 +60,11 @@ defmodule Ortex.Serving do
 
   @impl true
   def init(_inline_or_process, model, defn_options) do
-    # handle_batch/3 only jits an identity fn, so don't drag in a real defn compiler
-    defn_options = Enum.map(defn_options, &Keyword.put_new(&1, :compiler, Nx.Defn.Evaluator))
+    # handle_batch/3 only jits an identity fn, so a real defn compiler (e.g. EXLA,
+    # often set as the app-wide default via config :nx, :default_defn_options) must not
+    # leak in here: it would jit an identity per batch shape and round-trip the whole
+    # batch through the device before Ortex runs it. Force the Evaluator.
+    defn_options = Enum.map(defn_options, &Keyword.put(&1, :compiler, Nx.Defn.Evaluator))
     {:ok, {fn x -> Ortex.run(model, x) end, defn_options}}
   end
 

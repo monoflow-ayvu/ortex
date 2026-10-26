@@ -1,10 +1,5 @@
 { inputs, pkgs, ... }:
 
-let
-  nixpkgs-cmake = import inputs.nixpkgs-cmake { 
-    system = pkgs.stdenv.system; 
-  };
-in
 {
   packages = with pkgs; [
     autoconf
@@ -17,6 +12,7 @@ in
     git-lfs
     rustup
     onnxruntime
+    cmake
   ];
 
   languages = {

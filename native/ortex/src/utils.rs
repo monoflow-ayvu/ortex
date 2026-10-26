@@ -149,33 +149,46 @@ pub fn map_eps(env: Env, eps: Vec<Atom>) -> Result<Vec<ExecutionProviderDispatch
         .collect()
 }
 
-/// Register the Qualcomm QNN *plugin* execution provider library, once.
+/// Register the Qualcomm QNN *plugin* execution provider library, once - successful
+/// registrations only: a failed attempt is **not** cached, so a later `Ortex.load`
+/// that finds the library (e.g. the Nerves data partition mounts late) retries.
 ///
 /// Upstream `libonnxruntime.so` is not built with `--use_qnn`, so appending "QNN" by
 /// name fails with "QNN execution provider is not supported in this build." Instead the
 /// plugin has to be registered with the environment (ORT >= 1.23
 /// `RegisterExecutionProviderLibrary`) and then selected via `with_devices`.
 pub fn register_qnn_library(provider: &str) -> Result<(), String> {
-    static REGISTERED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    static REGISTERED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-    REGISTERED
-        .get_or_init(|| {
-            if !std::path::Path::new(provider).exists() {
-                return Err(format!("QNN plugin EP library not found at {provider}"));
-            }
+    let mut registered = REGISTERED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
-            let env = ort::environment::current()
-                .map_err(|e| format!("could not get ONNX Runtime environment: {e}"))?;
-            let lib = env
-                .register_ep_library("QNN", provider)
-                .map_err(|e| format!("failed to register QNN plugin EP from {provider}: {e}"))?;
+    if let Some(path) = registered.as_ref() {
+        if path != provider {
+            eprintln!(
+                "ortex: QNN plugin EP already registered from {path}; ignoring new provider path {provider}"
+            );
+        }
+        return Ok(());
+    }
 
-            // Unregistering would invalidate live sessions, and the EP has to stay
-            // available for the lifetime of the process.
-            std::mem::forget(lib);
-            Ok(())
-        })
-        .clone()
+    if !std::path::Path::new(provider).exists() {
+        // Not stored: retries with a valid path must still be possible.
+        return Err(format!("QNN plugin EP library not found at {provider}"));
+    }
+
+    let env = ort::environment::current()
+        .map_err(|e| format!("could not get ONNX Runtime environment: {e}"))?;
+    let lib = env
+        .register_ep_library("QNN", provider)
+        .map_err(|e| format!("failed to register QNN plugin EP from {provider}: {e}"))?;
+
+    // Unregistering would invalidate live sessions, and the EP has to stay
+    // available for the lifetime of the process.
+    std::mem::forget(lib);
+    *registered = Some(provider.to_string());
+    Ok(())
 }
 
 pub fn qnn_provider_path() -> String {
@@ -203,5 +216,20 @@ pub fn is_bool_input(inp: &ValueType) -> bool {
         ValueType::Map { value, .. } => value == &TensorElementType::Bool,
         ValueType::Sequence(boxed_input) => is_bool_input(boxed_input),
         ValueType::Optional(boxed_input) => is_bool_input(boxed_input),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // R6: a failed registration must not be cached - a second call with the same
+    // (still invalid) path has to attempt registration again rather than replay
+    // the sticky `get_or_init` error of the first attempt.
+    #[test]
+    fn qnn_registration_failure_is_not_cached() {
+        let path = "surely/not/a/QNN/lib.so";
+        assert!(register_qnn_library(path).is_err());
+        assert!(register_qnn_library(path).is_err());
     }
 }

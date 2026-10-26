@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use ort::execution_providers::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
 use ort::session::{Session, SessionInputValue};
-use ort::value::{Outlet, ValueType};
+use ort::value::{Outlet, TensorElementType, ValueType};
 use ort::Error;
 use rustler::{Atom, Resource, ResourceArc};
 
@@ -18,6 +18,13 @@ use rustler::{Atom, Resource, ResourceArc};
 /// are threadsafe so this can be called concurrently from the beam.
 pub struct OrtexModel {
     pub session: Mutex<Session>,
+    /// `IoSpec` for inputs and outputs, captured when the session is committed. The
+    /// session I/O is immutable for its lifetime, so every reader of `show`
+    /// (i.e. `Inspect` in logs, IEx, `dbg`) gets a plain `&self` read instead of
+    /// taking the same `session` lock that `run` holds for the whole inference -
+    /// inspecting a model while inference is in flight used to park a normal BEAM
+    /// scheduler for the duration of the forward pass.
+    pub io: (IoSpec, IoSpec),
 }
 
 #[rustler::resource_impl(name = "OrtexModel")]
@@ -27,7 +34,9 @@ impl std::panic::RefUnwindSafe for OrtexModel {}
 impl std::panic::UnwindSafe for OrtexModel {}
 
 /// `(Name, Type, Dimension)` triples describing a session's inputs or outputs.
-pub type IoSpec = Vec<(String, String, Option<Vec<i64>>)>;
+/// `Dimension` is `Option<Vec<Option<i64>>>`: the outer `None` marks a non-tensor
+/// inlet, and an inner `None` marks a dynamic dimension (onnxruntime reports it as -1).
+pub type IoSpec = Vec<(String, String, Option<Vec<Option<i64>>>)>;
 
 /// Keys in `qnn_opts` that configure ortex itself rather than the QNN EP, and
 /// so must not be forwarded to onnxruntime as provider options.
@@ -244,24 +253,65 @@ pub fn init(
         };
     }
 
+    // When a QNN graph is offloaded to the NPU, the whole graph is one slow node and
+    // the intra-op pool has nothing to parallelize, so the measured-safe defaults
+    // (intra_threads=1, intra_op_spinning=false) apply unless the caller set its own
+    // policy; explicit keys were consumed above and win over these.
+    if use_qnn && lookup(&qnn_opts, "intra_threads").is_none() {
+        builder = builder.with_intra_threads(1)?;
+    }
+    if use_qnn && lookup(&qnn_opts, "intra_op_spinning").is_none() {
+        builder = builder.with_intra_op_spinning(false)?;
+    }
+
     let mut builder = if use_qnn {
         with_qnn(builder, &qnn_opts)?
     } else {
         builder
     };
 
+    let session = builder.commit_from_file(model_path)?;
+    let io = (describe(session.inputs()), describe(session.outputs()));
+
     Ok(OrtexModel {
-        session: Mutex::new(builder.commit_from_file(model_path)?),
+        session: Mutex::new(session),
+        io,
     })
 }
 
 /// Returns input/output information about a model. The result is a Tuple of
-/// `inputs` and `outputs` with elements of `(Name, Type, Dimension)` where
-/// `Dimension` elements of -1 are dynamic.
+/// `inputs` and `outputs` with elements of `(Name, Type, Dimension)` where a dynamic
+/// dimension is `nil`. This is a pure `&self` read: the spec was captured at `init`,
+/// so callers (`Inspect`/logs/IEx) never wait on the session lock that inference holds.
 pub fn show(model: ResourceArc<OrtexModel>) -> (IoSpec, IoSpec) {
-    let session = model.session.lock().unwrap_or_else(|e| e.into_inner());
+    model.io.clone()
+}
 
-    (describe(session.inputs()), describe(session.outputs()))
+/// Formats a value type as a readable name, e.g. `Float32`. The raw `Debug` dump of
+/// `ValueType` is a multi-line struct dump that does not match the documentation.
+fn dtype_name(value_type: &ValueType) -> String {
+    match value_type {
+        ValueType::Tensor { ty, .. } => match ty {
+            TensorElementType::Bfloat16 => "Bfloat16".into(),
+            TensorElementType::Float16 => "Float16".into(),
+            TensorElementType::Float32 => "Float32".into(),
+            TensorElementType::Float64 => "Float64".into(),
+            TensorElementType::Uint8 => "Uint8".into(),
+            TensorElementType::Uint16 => "Uint16".into(),
+            TensorElementType::Uint32 => "Uint32".into(),
+            TensorElementType::Uint64 => "Uint64".into(),
+            TensorElementType::Int8 => "Int8".into(),
+            TensorElementType::Int16 => "Int16".into(),
+            TensorElementType::Int32 => "Int32".into(),
+            TensorElementType::Int64 => "Int64".into(),
+            TensorElementType::Bool => "Bool".into(),
+            TensorElementType::String => "String".into(),
+            other => format!("{other:?}"),
+        },
+        ValueType::Map { .. } => "Map".into(),
+        ValueType::Sequence(..) => "Sequence".into(),
+        ValueType::Optional(..) => "Optional".into(),
+    }
 }
 
 fn describe(outlets: &[Outlet]) -> IoSpec {
@@ -269,14 +319,17 @@ fn describe(outlets: &[Outlet]) -> IoSpec {
         .iter()
         .map(|outlet| {
             let dims = match outlet.dtype() {
-                ValueType::Tensor { shape, .. } => Some(shape.to_vec()),
+                ValueType::Tensor { shape, .. } => Some(
+                    shape
+                        .iter()
+                        // onnxruntime reports dynamic dimensions as -1; surface them
+                        // as `nil` so the docs and the data agree.
+                        .map(|dim| if *dim == -1 { None } else { Some(*dim) })
+                        .collect(),
+                ),
                 _ => None,
             };
-            (
-                outlet.name().to_string(),
-                format!("{:#?}", outlet.dtype()),
-                dims,
-            )
+            (outlet.name().to_string(), dtype_name(&outlet.dtype()), dims)
         })
         .collect()
 }

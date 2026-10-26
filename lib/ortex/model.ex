@@ -15,7 +15,8 @@ defmodule Ortex.Model do
   ]>
   ```
 
-  `nil` values represent dynamic dimensions
+  `nil` values represent dynamic dimensions, and the type is the element type name
+  (`"Float32"`, `"Int64"`, ...).
   """
 
   @enforce_keys [:reference]

@@ -236,15 +236,32 @@ where
     })
 }
 
+/// Serializes a standard-layout array as raw bytes.
+///
+/// Invariant: the bytes are only meaningful for arrays in standard (C) layout.
+/// `from_binary`, `to_owned` and `from_shape_vec` all produce standard-layout
+/// arrays today; if a shared/offset view ever reaches here, it has to be
+/// normalized first (e.g. `as_standard_layout`), otherwise the bytes are written
+/// from the wrong offsets. Checked in debug builds.
 fn get_bytes<'a, T>(array: &'a ArrayBase<T, IxDyn>) -> &'a [u8]
 where
     T: Data,
+    T::Elem: Copy,
 {
-    let len = array.len();
-    let binding = unsafe { std::mem::zeroed() };
-    let f = array.get(0).unwrap_or(&binding);
-    let size: usize = std::mem::size_of_val(f);
-    unsafe { std::slice::from_raw_parts(array.as_ptr() as *const u8, len * size) }
+    // Empty arrays have no bytes to expose.
+    if array.is_empty() {
+        return &[];
+    }
+    debug_assert!(
+        array.is_standard_layout(),
+        "get_bytes assumes standard layout; got stride-based order {:?}",
+        array.strides()
+    );
+    // Element size from the type, not from indexing: IxDyn can't multi-axis-index
+    // by scalar and `size_of_val` of a synthesized reference is what hid 2-D arrays
+    // behind a zeroed fallback before.
+    let size = std::mem::size_of::<T::Elem>();
+    unsafe { std::slice::from_raw_parts(array.as_ptr() as *const u8, array.len() * size) }
 }
 
 impl TryFrom<&Value> for OrtexTensor {
@@ -360,10 +377,10 @@ macro_rules! concatenate {
 
         let joined =
             ndarray::concatenate(Axis($axis), &views).map_err(|e| Error::new(e.to_string()))?;
-        // data is not contiguous after the concatenation above. To decode
-        // properly, need to create a new contiguous vector
-        let contiguous = Array::from_shape_vec(joined.raw_dim(), joined.iter().cloned().collect())
-            .map_err(|e| Error::new(e.to_string()))?;
+        // data is not contiguous (and the standard-layout normalization) after the
+        // concatenation above; copy once into an owned container with the right
+        // capacity.
+        let contiguous = joined.as_standard_layout().into_owned();
         Ok(OrtexTensor::$ort_tensor_kind(contiguous))
     }};
 }
