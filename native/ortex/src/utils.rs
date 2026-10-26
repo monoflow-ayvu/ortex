@@ -68,7 +68,7 @@ pub fn from_binary(
     macro_rules! tensor {
         ($typ:ty, $ort_tensor_kind:ident) => {
             Ok(ResourceArc::new(OrtexTensor::$ort_tensor_kind(
-                array_from_binary::<$typ>(&bin, &shape)?,
+                array_from_binary::<$typ>(&bin, &shape)?.into_shared(),
             )))
         };
     }
