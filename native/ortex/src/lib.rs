@@ -45,7 +45,16 @@ fn run(
     model: ResourceArc<model::OrtexModel>,
     inputs: Vec<ResourceArc<TensorResource>>,
 ) -> NifResult<Vec<RunOutput>> {
-    Ok(model::run(model, inputs)?)
+    Ok(model::run(model, model::Inputs::Positional(inputs))?)
+}
+
+/// Same as `run/2`, with inputs addressed by the model's own input names.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn run_named(
+    model: ResourceArc<model::OrtexModel>,
+    inputs: Vec<(String, ResourceArc<TensorResource>)>,
+) -> NifResult<Vec<RunOutput>> {
+    Ok(model::run(model, model::Inputs::Named(inputs))?)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]

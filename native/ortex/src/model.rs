@@ -11,8 +11,8 @@ use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
-use ort::session::{Session, SessionInputValue};
-use ort::value::{Outlet, ValueType};
+use ort::session::{Session, SessionInputValue, SessionInputs};
+use ort::value::{Outlet, TensorElementType, ValueType};
 use rustler::{Atom, Resource, ResourceArc};
 
 /// Holds the model state which include onnxruntime sessions and environment. All
@@ -452,12 +452,103 @@ fn describe(outlets: &[Outlet]) -> IoSpec {
 /// `Nx.Tensor` around it (shape, dtype atom, dtype bits).
 pub type RunOutput = (ResourceArc<TensorResource>, Vec<usize>, Atom, usize);
 
+/// How a caller addressed the model's inputs.
+pub enum Inputs {
+    /// In the model's declared order: `Ortex.run(model, {x, y})`. Fast, and the reason
+    /// each tensor is checked against its expected dtype and shape before the run - two
+    /// same-typed inputs given in the wrong order used to produce a plausible result.
+    Positional(Vec<ResourceArc<TensorResource>>),
+    /// By name: `Ortex.run(model, %{"x" => x, "y" => y})`. ONNX Runtime matches these
+    /// itself, so input order stops mattering.
+    Named(Vec<(String, ResourceArc<TensorResource>)>),
+}
+
+impl Inputs {
+    fn len(&self) -> usize {
+        match self {
+            Inputs::Positional(tensors) => tensors.len(),
+            Inputs::Named(pairs) => pairs.len(),
+        }
+    }
+}
+
+/// Inputs after conversion, in the shape `Session::run` accepts.
+enum OrtInputs<'a> {
+    Positional(Vec<SessionInputValue<'a>>),
+    Named(Vec<(String, SessionInputValue<'a>)>),
+}
+
+/// Rejects a tensor that does not fit the outlet's declared rank, shape or element type.
+///
+/// ONNX Runtime would also fail on a hard mismatch, but only after the caller has paid for
+/// the copy into an ORT value, and its message names the tensor without saying what was
+/// expected. Shapes with a dynamic axis (`-1`) are not checked on that axis.
+fn validate_input(outlet: &Outlet, tensor: &OrtexTensor) -> Result<(), OrtexError> {
+    let ValueType::Tensor { ty, shape, .. } = outlet.dtype() else {
+        // Non-tensor inputs are not built by this crate; let ORT describe the problem.
+        return Ok(());
+    };
+
+    let actual_ty = tensor.element_type();
+    // A bool input arrives as 0/1 u8 (how Nx sees booleans) and is rewritten by `run`.
+    let bool_from_u8 = *ty == TensorElementType::Bool && actual_ty == TensorElementType::Uint8;
+
+    if &actual_ty != ty && !bool_from_u8 {
+        return Err(OrtexError::invalid_input(format!(
+            "Input {:?} expects {:?}, got {:?}",
+            outlet.name(),
+            ty,
+            actual_ty
+        )));
+    }
+
+    let actual_shape = tensor.shape();
+    let declared: Vec<Option<usize>> = shape
+        .iter()
+        .map(|dim| (*dim >= 0).then_some(*dim as usize))
+        .collect();
+
+    if declared.len() != actual_shape.len() {
+        return Err(OrtexError::invalid_input(format!(
+            "Input {:?} expects rank {} (shape {declared:?}), got rank {} (shape {actual_shape:?})",
+            outlet.name(),
+            declared.len(),
+            actual_shape.len()
+        )));
+    }
+
+    for (axis, (expected, got)) in declared.iter().zip(actual_shape.iter()).enumerate() {
+        if let Some(expected) = expected {
+            if expected != got {
+                return Err(OrtexError::invalid_input(format!(
+                    "Input {:?} axis {axis} expects {expected}, got {got} (declared shape \
+                     {declared:?}, got {actual_shape:?})",
+                    outlet.name()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Turns tensors into session values, substituting the bool rewrite where one was made.
+fn convert<'a>(
+    tensors: impl Iterator<Item = &'a OrtexTensor>,
+    boolified: &'a [Option<OrtexTensor>],
+) -> Result<Vec<SessionInputValue<'a>>, OrtexError> {
+    tensors
+        .enumerate()
+        .map(|(index, tensor)| match &boolified[index] {
+            Some(converted) => Ok(converted.try_into()?),
+            None => Ok(tensor.try_into()?),
+        })
+        .collect()
+}
+
 /// Runs the model with the given inputs. Returns a vector of tensors. Use `model::show`
 /// to see what the model expects for input and output shapes.
-pub fn run(
-    model: ResourceArc<OrtexModel>,
-    inputs: Vec<ResourceArc<TensorResource>>,
-) -> Result<Vec<RunOutput>, OrtexError> {
+pub fn run(model: ResourceArc<OrtexModel>, inputs: Inputs) -> Result<Vec<RunOutput>, OrtexError> {
     let mut session = acquire(&model.sessions, &model.next);
 
     let output_names: Vec<String> = session
@@ -466,7 +557,6 @@ pub fn run(
         .map(|output| output.name().to_string())
         .collect();
 
-    let mut ortified_inputs: Vec<SessionInputValue> = Vec::new();
     // Boolean inputs arrive as 0/1 u8 (that is how Nx sees them) and have to be rewritten
     // into a bool tensor. The rewrite allocates, so its output has to outlive the
     // SessionInputValue that points at it - hence a slot per input, filled before any
@@ -475,32 +565,86 @@ pub fn run(
 
     // Scoped so the borrow of the input specs ends before session.run() takes the
     // session mutably.
-    {
+    let ort_inputs = {
         let session_inputs = session.inputs();
-        if inputs.len() != session_inputs.len() {
-            return Err(OrtexError::invalid_input(format!(
-                "Expected {} input(s), got {}",
-                session_inputs.len(),
-                inputs.len()
-            )));
-        }
 
-        for (index, (elixir_input, onnx_input)) in zip(inputs.iter(), session_inputs).enumerate() {
-            if is_bool_input(onnx_input.dtype()) {
-                boolified[index] = Some(elixir_input.to_bool()?);
+        match &inputs {
+            Inputs::Positional(tensors) => {
+                if tensors.len() != session_inputs.len() {
+                    return Err(OrtexError::invalid_input(format!(
+                        "Expected {} input(s), got {}",
+                        session_inputs.len(),
+                        tensors.len()
+                    )));
+                }
+
+                for (index, (tensor, outlet)) in zip(tensors.iter(), session_inputs).enumerate() {
+                    validate_input(outlet, tensor)?;
+                    if is_bool_input(outlet.dtype()) {
+                        boolified[index] = Some(tensor.to_bool()?);
+                    }
+                }
+
+                OrtInputs::Positional(convert(tensors.iter().map(|t| &***t), &boolified)?)
+            }
+            Inputs::Named(pairs) => {
+                let expected: Vec<String> = session_inputs
+                    .iter()
+                    .map(|outlet| format!("{:?}", outlet.name()))
+                    .collect();
+
+                if pairs.len() != session_inputs.len() {
+                    return Err(OrtexError::invalid_input(format!(
+                        "Expected {} input(s) ({}), got {}",
+                        session_inputs.len(),
+                        expected.join(", "),
+                        pairs.len()
+                    )));
+                }
+
+                for (index, (name, tensor)) in pairs.iter().enumerate() {
+                    let outlet = session_inputs
+                        .iter()
+                        .find(|outlet| outlet.name() == name)
+                        .ok_or_else(|| {
+                            OrtexError::invalid_input(format!(
+                                "No input named {name:?}; this model expects {}",
+                                expected.join(", ")
+                            ))
+                        })?;
+
+                    if pairs[..index].iter().any(|(seen, _)| seen == name) {
+                        return Err(OrtexError::invalid_input(format!(
+                            "Input {name:?} was given twice"
+                        )));
+                    }
+
+                    validate_input(outlet, tensor)?;
+                    if is_bool_input(outlet.dtype()) {
+                        boolified[index] = Some(tensor.to_bool()?);
+                    }
+                }
+
+                let converted = convert(pairs.iter().map(|(_, t)| &***t), &boolified)?;
+                OrtInputs::Named(
+                    zip(pairs.iter(), converted)
+                        .map(|((name, _), value)| (name.clone(), value))
+                        .collect(),
+                )
             }
         }
-    }
+    };
 
-    for (index, elixir_input) in inputs.iter().enumerate() {
-        let value: SessionInputValue = match &boolified[index] {
-            Some(converted) => converted.try_into()?,
-            None => (&***elixir_input).try_into()?,
-        };
-        ortified_inputs.push(value);
-    }
-
-    let mut outputs = session.run(&ortified_inputs[..])?;
+    let mut outputs = match ort_inputs {
+        OrtInputs::Positional(values) => session.run(&values[..])?,
+        OrtInputs::Named(values) => {
+            let pairs: Vec<(std::borrow::Cow<'_, str>, SessionInputValue<'_>)> = values
+                .into_iter()
+                .map(|(name, value)| (std::borrow::Cow::Owned(name), value))
+                .collect();
+            session.run::<0>(SessionInputs::ValueMap(pairs))?
+        }
+    };
 
     // Every output keeps the ORT-owned value instead of copying it into an ndarray:
     // `to_binary` then points the BEAM binary straight at ORT's buffer. Holding it past

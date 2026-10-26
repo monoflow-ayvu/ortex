@@ -72,7 +72,7 @@ defmodule OrtexTest do
     missing = Path.join(System.tmp_dir!(), "no-such-qnn-#{System.unique_integer([:positive])}.so")
 
     assert {:error, %Ortex.Error{reason: :qnn, provider: :qnn, detail: detail}} =
-             Ortex.load("./models/tinymodel.onnx", [:qnn], 3, provider_path: missing)
+             Ortex.load("./models/tinymodel.onnx", [:qnn], 3, qnn: [provider_path: missing])
 
     assert detail =~ "not found at"
 
@@ -80,7 +80,7 @@ defmodule OrtexTest do
     # lets a Nerves device load the QNN libraries after the first attempt failed.
     assert {:error, %Ortex.Error{reason: :qnn, detail: detail}} =
              Ortex.load("./models/tinymodel.onnx", [:qnn], 3,
-               provider_path: Path.expand("./models/tinymodel.onnx")
+               qnn: [provider_path: Path.expand("./models/tinymodel.onnx")]
              )
 
     assert detail =~ "failed to register QNN plugin EP"

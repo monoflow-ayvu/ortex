@@ -87,12 +87,12 @@ defmodule Ortex.TestModel do
     assert {:error, %Ortex.Error{reason: :invalid_option, detail: detail}} =
              Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: 0)
 
-    assert detail =~ "sessions must be at least 1, got 0"
+    assert detail =~ "sessions: must be a positive integer, got: 0"
 
     assert {:error, %Ortex.Error{reason: :invalid_option, detail: detail}} =
              Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: "four")
 
-    assert detail =~ "sessions must be a non-negative integer"
+    assert detail =~ "sessions: must be a positive integer, got: \"four\""
   end
 
   # Outputs arrive as ORT-owned values (P6). Any array operation has to materialize them

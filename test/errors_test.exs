@@ -41,11 +41,74 @@ defmodule Ortex.TestErrors do
     assert raised == error
   end
 
-  test "an invalid intra_threads value is :invalid_option at load" do
+  test "an invalid intra value is :invalid_option at load" do
     assert {:error, %Ortex.Error{reason: :invalid_option, detail: detail}} =
-             Ortex.load("./models/tinymodel.onnx", [:cpu], 3, intra_threads: "abc")
+             Ortex.load("./models/tinymodel.onnx", [:cpu], 3, threads: [intra: "abc"])
 
-    assert detail =~ "intra_threads must be a non-negative integer"
+    assert detail =~ "threads: intra must be a non-negative integer"
+  end
+
+  test "the grouped options are flattened to the NIF's key/value pairs" do
+    assert {:ok, flat} =
+             Ortex.Options.to_nif(
+               sessions: 2,
+               threads: [intra: 1, inter: 2, intra_op_spinning: false],
+               trace: "/tmp/ortex.trace",
+               env: %{"DSP_LIBRARY_PATH" => "/usr/lib/rfsa/adsp"},
+               qnn: [htp_arch: 68]
+             )
+
+    assert Enum.sort(flat) ==
+             Enum.sort([
+               {"sessions", "2"},
+               {"intra_threads", "1"},
+               {"inter_threads", "2"},
+               {"intra_op_spinning", "false"},
+               {"trace_path", "/tmp/ortex.trace"},
+               {"env.DSP_LIBRARY_PATH", "/usr/lib/rfsa/adsp"},
+               {"htp_arch", "68"}
+             ])
+  end
+
+  test "the deprecated flat form is translated with a warning" do
+    warning =
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        assert {:ok, flat} =
+                 Ortex.Options.to_nif(
+                   sessions: 2,
+                   intra_threads: 1,
+                   trace_path: "/tmp/legacy.trace",
+                   "env.DSP_LIBRARY_PATH": "/usr/lib/rfsa/adsp",
+                   htp_arch: 68
+                 )
+
+        assert Enum.sort(flat) ==
+                 Enum.sort([
+                   {"sessions", "2"},
+                   {"intra_threads", "1"},
+                   {"trace_path", "/tmp/legacy.trace"},
+                   {"env.DSP_LIBRARY_PATH", "/usr/lib/rfsa/adsp"},
+                   {"htp_arch", "68"}
+                 ])
+      end)
+
+    assert warning =~ "flat options are deprecated"
+  end
+
+  test "an unknown load option names the groups that are accepted" do
+    assert {:error, %Ortex.Error{reason: :invalid_option, detail: detail}} =
+             Ortex.load("./models/tinymodel.onnx", [:cpu], 3, threads: [intra: 1], sesions: 2)
+
+    assert detail =~ ":sesions"
+    assert detail =~ "expected groups"
+  end
+
+  test "an ortex-owned key inside qnn: points at the group that owns it" do
+    assert {:error, %Ortex.Error{reason: :invalid_option, detail: detail}} =
+             Ortex.load("./models/tinymodel.onnx", [:qnn], 3, qnn: [intra_threads: 1])
+
+    assert detail =~ "qnn: intra_threads is an Ortex option"
+    assert detail =~ "pass it to threads:"
   end
 
   test "an execution provider that was not compiled in names the provider and the feature" do

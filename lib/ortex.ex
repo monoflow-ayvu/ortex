@@ -20,30 +20,56 @@ defmodule Ortex do
   that ships them has to be present too. Requesting a provider that was not compiled in raises
   at load, naming the feature to rebuild with, rather than silently running on the CPU.
 
-  `qnn_opts` configures the QNN execution provider. `backend_path` and `provider_path` pick
-  the QNN libraries and any other key is forwarded as a QNN provider option (`htp_arch: 68`);
-  those only apply when `:qnn` is among `eps`. `trace_path` and `"env.NAME"` keys take effect
-  regardless: the first writes an ORT trace (it needs the `trace` cargo feature - see the
-  README - and is a no-op that says so without it), the second exports `NAME` into the OS
-  environment, the only way QNN's own `getenv` calls can see it.
+  ## Options
 
-  `sessions: N` loads N copies of the same graph into the model. An ONNX Runtime session is
-  exclusive - `Session::run` takes `&mut self` - so with the default of 1 every inference on
-  the model is serialised, and `Nx.Serving` partitions/batch_size only queue work. Set
-  `sessions:` above 1 when concurrent inferences have to overlap. Each pooled session loads
-  the graph and its thread pools again, so the extra memory is proportional to N.
+  The fourth argument groups options by what they configure:
+
+    * `sessions: N` - loads N copies of the same graph into the model. An ONNX Runtime
+      session is exclusive (`Session::run` takes `&mut self`), so with the default of 1
+      every inference on the model is serialised and `Nx.Serving` partitions/batch_size
+      only queue work. Each pooled session loads the graph and its thread pools again, so
+      the extra memory is proportional to N.
+
+    * `threads: [...]` - ONNX Runtime's thread pools: `intra:` (intra-op threads),
+      `inter:` (inter-op threads), `intra_op_spinning:` and `inter_op_spinning:`
+      (booleans). These apply to every provider, which is why they are not QNN options.
+
+    * `trace: path` - writes an ORT trace (EP registration, device selection, per-node
+      placement) to that file. Needs the `trace` cargo feature - see the README - and is
+      a no-op that says so without it. `ORTEX_TRACE` does the same from the environment.
+
+    * `env: %{"NAME" => value}` - exports variables into the OS environment. This is the
+      only way QNN's own `getenv()` calls can see them: `System.put_env/2` writes Erlang's
+      table, which the NIF's C libraries never read.
+
+    * `qnn: [...]` - QNN execution provider options: `provider_path` and `backend_path`
+      pick the QNN plugin and backend libraries, and everything else (`htp_arch: 68`) is
+      forwarded as a provider option. Only used when `:qnn` is among `eps`.
 
   When `:qnn` is among `eps`, the thread pool defaults assume the graph is one offloaded NPU
-  node: `intra_threads: 1` and `intra_op_spinning: false`. The default pool's spinning workers
+  node: `threads: [intra: 1, intra_op_spinning: false]`. The default pool's spinning workers
   burn every core while the NPU runs, which measurably throttles the package (24 -> 20.6 fps
-  on a Dragon Q6A). Pass `intra_threads:` or `intra_op_spinning:` in `qnn_opts` to override,
-  and `inter_threads`/`inter_op_spinning` for CPU-side EPs, which keep onnxruntime's defaults.
+  on a Dragon Q6A). Override with `threads:`; CPU-side providers keep onnxruntime's defaults
+  for `inter`.
+
+  The flat form (`intra_threads: 1`, `trace_path: ...`, `htp_arch: 68`, `"env.NAME"`) is
+  accepted for one release cycle, translated to the groups above and warned about.
 
   ## Examples
 
       iex> {:ok, _model} = Ortex.load("./models/tinymodel.onnx")
       iex> Ortex.load!("./models/tinymodel.onnx", [:cpu], 0)
       iex> Ortex.load!("./models/tinymodel.onnx", [:cpu], 3, sessions: 4)
+
+  Grouped options, QNN included:
+
+  ```elixir
+  Ortex.load!("./models/model.onnx", [:qnn], 3,
+    qnn: [htp_arch: 68],
+    threads: [intra: 1, intra_op_spinning: false],
+    trace: "/tmp/ortex.trace"
+  )
+  ```
 
   A provider list is ordered by priority, and only providers compiled into the NIF can be
   requested:
@@ -80,10 +106,18 @@ defmodule Ortex do
   tensors, it's up to the user to transfer these back to another backend if additional
   ops are required.
 
-  If there is only one input you can optionally pass a bare tensor rather than a tuple.
+  Inputs can be addressed positionally or by name, and both are validated against the
+  model's declared dtypes and shapes before the run:
 
-  Raises `Ortex.Error` when the tensors do not fit the model (`:invalid_input`) or ONNX
-  Runtime refuses the run (`:onnxruntime`).
+    * a tuple (or a bare tensor for a single-input model) is positional;
+    * a map or a list of `{name, tensor}` pairs names them: `%{"x" => x, "y" => y}`.
+
+  Positional inputs have to match the model's declared order - a model with two
+  same-typed inputs accepts them swapped and returns a plausible wrong answer otherwise.
+  Named inputs remove that ordering from the contract entirely.
+
+  Raises `Ortex.Error` when the tensors do not fit the model (`:invalid_input`, naming the
+  input, axis and both shapes) or ONNX Runtime refuses the run (`:onnxruntime`).
 
   ## Examples
 
