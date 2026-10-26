@@ -205,6 +205,11 @@ ORTEX_FEATURES=trace mix compile
 Without the feature, `trace_path` and `ORTEX_TRACE` are a no-op and say so once on stderr
 rather than writing an empty file.
 
+`ORTEX_FEATURES` is read at compile time and belongs to the compile-time application
+environment, so changing it for an already-built project needs a clean first - `mix clean`
+here, or `mix deps.clean ortex --build` from a consumer - otherwise Mix refuses to run with
+"a different value set for key Ortex.Native during runtime compared to compile time".
+
 
 ## Packaging and Offline Builds
 
