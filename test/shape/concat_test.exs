@@ -123,7 +123,7 @@ defmodule Ortex.TestConcat do
   end)
 
   test "Concat fails to concat vectors of differing types" do
-    assert_raise RuntimeError,
+    assert_raise Ortex.Error,
                  "Ortex does not currently support concatenation of vectors with differing types.",
                  fn ->
                    t1 = Nx.tensor([1, 2, 3], type: {:s, 16}) |> Nx.backend_transfer(Ortex.Backend)

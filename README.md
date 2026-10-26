@@ -16,7 +16,7 @@ ML, and ARM Compute Library.
 TL;DR:
 
 ```elixir
-iex> model = Ortex.load("./models/resnet50.onnx")
+iex> model = Ortex.load!("./models/resnet50.onnx")
 #Ortex.Model<
   inputs: [{"input", "f32", [nil, 3, 224, 224]}]
   outputs: [{"output", "f32", [nil, 1000]}]>
@@ -55,7 +55,7 @@ queue, they do not add parallelism. `sessions: N` loads N sessions of the *same*
 round-robins inferences over them:
 
 ```elixir
-model = Ortex.load("./models/resnet50.onnx", [:cpu], 3, sessions: 4)
+model = Ortex.load!("./models/resnet50.onnx", [:cpu], 3, sessions: 4)
 ```
 
 Each pooled session loads the graph and its own thread pools, so N is bounded by memory.

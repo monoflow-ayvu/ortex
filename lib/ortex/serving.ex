@@ -13,7 +13,7 @@ defmodule Ortex.Serving do
   To quickly create an `Ortex.Serving` and run it
 
   ```elixir
-  iex> model = Ortex.load("./models/resnet50.onnx")
+  iex> model = Ortex.load!("./models/resnet50.onnx")
   iex> serving = Nx.Serving.new(Ortex.Serving, model)
   iex> batch = Nx.Batch.stack([{Nx.broadcast(0.0, {3, 224, 224})}])
   iex> {result} = Nx.Serving.run(serving, batch)

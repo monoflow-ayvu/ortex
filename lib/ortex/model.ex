@@ -23,13 +23,18 @@ defmodule Ortex.Model do
   defstruct [:reference]
 
   @doc false
-  def load(path, eps \\ [:cpu], opt \\ 3, qnn_opts \\ []) do
-    case Ortex.Native.init(path, eps, opt, stringify_opts(qnn_opts)) do
-      {:error, msg} ->
-        raise msg
+  def load(path, eps \\ [:cpu], opt \\ 3, opts \\ []) do
+    case Ortex.Native.init(path, eps, opt, stringify_opts(opts)) do
+      {:error, reason} -> {:error, Ortex.Error.from_nif(reason)}
+      model -> {:ok, %Ortex.Model{reference: model}}
+    end
+  end
 
-      model ->
-        %Ortex.Model{reference: model}
+  @doc false
+  def load!(path, eps \\ [:cpu], opt \\ 3, opts \\ []) do
+    case load(path, eps, opt, opts) do
+      {:ok, model} -> model
+      {:error, error} -> raise error
     end
   end
 
@@ -53,7 +58,7 @@ defmodule Ortex.Model do
              |> Enum.map(fn x -> x |> Nx.backend_transfer(Ortex.Backend) end)
              |> Enum.map(fn %Nx.Tensor{data: %Ortex.Backend{ref: x}} -> x end)
            ) do
-        {:error, msg} -> raise msg
+        {:error, reason} -> raise Ortex.Error.from_nif(reason)
         output -> output
       end
 
@@ -76,8 +81,8 @@ defimpl Inspect, for: Ortex.Model do
 
   def inspect(%Ortex.Model{reference: model}, inspect_opts) do
     case Ortex.Native.show_session(model) do
-      {:error, msg} ->
-        raise msg
+      {:error, reason} ->
+        raise Ortex.Error.from_nif(reason)
 
       {inputs, outputs} ->
         force_unfit(

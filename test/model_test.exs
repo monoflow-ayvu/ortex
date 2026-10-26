@@ -4,7 +4,7 @@ defmodule Ortex.TestModel do
   use ExUnit.Case
 
   setup_all do
-    %{model: Ortex.load("./models/tinymodel.onnx")}
+    %{model: Ortex.load!("./models/tinymodel.onnx")}
   end
 
   defp inputs(row) do
@@ -67,7 +67,7 @@ defmodule Ortex.TestModel do
   end
 
   test "sessions: N loads a pool and concurrent runs stay correct" do
-    model = Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: 4)
+    model = Ortex.load!("./models/tinymodel.onnx", [:cpu], 3, sessions: 4)
 
     results =
       1..16
@@ -84,13 +84,15 @@ defmodule Ortex.TestModel do
   end
 
   test "sessions: 0 is rejected instead of deadlocking on an empty pool" do
-    assert_raise RuntimeError, ~r/sessions must be at least 1, got 0/, fn ->
-      Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: 0)
-    end
+    assert {:error, %Ortex.Error{reason: :invalid_option, detail: detail}} =
+             Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: 0)
 
-    assert_raise RuntimeError, ~r/sessions must be a non-negative integer/, fn ->
-      Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: "four")
-    end
+    assert detail =~ "sessions must be at least 1, got 0"
+
+    assert {:error, %Ortex.Error{reason: :invalid_option, detail: detail}} =
+             Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: "four")
+
+    assert detail =~ "sessions must be a non-negative integer"
   end
 
   # Outputs arrive as ORT-owned values (P6). Any array operation has to materialize them
@@ -114,7 +116,7 @@ defmodule Ortex.TestModel do
   end
 
   test "an optimization level of 0 still produces a usable session", %{model: model} do
-    unoptimized = Ortex.load("./models/tinymodel.onnx", [:cpu], 0)
+    unoptimized = Ortex.load!("./models/tinymodel.onnx", [:cpu], 0)
 
     [o1 | _] = run!(unoptimized, inputs(1))
     [o2 | _] = run!(model, inputs(1))

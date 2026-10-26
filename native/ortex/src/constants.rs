@@ -23,6 +23,9 @@ pub mod ortex_atoms {
         s, u, f, bf, c,
         // Execution provider atoms
         cpu, cuda, tensorrt, acl, dnnl,
-        onednn, coreml, directml, rocm, qnn
+        onednn, coreml, directml, rocm, qnn,
+        // `Ortex.Error.reason` values - a closed set, so the BEAM can match on them
+        // instead of parsing a message.
+        onnxruntime, invalid_option, invalid_input, execution_provider
     }
 }

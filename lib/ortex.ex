@@ -4,6 +4,10 @@ defmodule Ortex do
 
   `Ortex` is an Elixir wrapper around [ONNX Runtime](https://onnxruntime.ai/) using
   [Rustler](https://hexdocs.pm/rustler) and [ORT](https://github.com/pykeio/ort).
+
+  Failures are `Ortex.Error` structs: `load/4` returns `{:ok, model} | {:error, error}`,
+  `load!/4` and `run/2` raise them. Each carries a `:reason`, the `:provider` when the
+  failure is about one, and the message in `:detail`.
   """
 
   @doc """
@@ -37,19 +41,35 @@ defmodule Ortex do
 
   ## Examples
 
-      iex> Ortex.load("./models/tinymodel.onnx")
-      iex> Ortex.load("./models/tinymodel.onnx", [:cpu], 0)
-      iex> Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: 4)
+      iex> {:ok, _model} = Ortex.load("./models/tinymodel.onnx")
+      iex> Ortex.load!("./models/tinymodel.onnx", [:cpu], 0)
+      iex> Ortex.load!("./models/tinymodel.onnx", [:cpu], 3, sessions: 4)
 
   A provider list is ordered by priority, and only providers compiled into the NIF can be
   requested:
 
   ```elixir
-  Ortex.load("./models/resnet50.onnx", [:cuda, :cpu])
+  case Ortex.load("./models/resnet50.onnx", [:cuda, :cpu]) do
+    {:ok, model} -> model
+    {:error, %Ortex.Error{reason: :execution_provider, provider: :cuda} = error} -> raise error
+  end
   ```
 
   """
-  defdelegate load(path, eps \\ [:cpu], opt \\ 3, qnn_opts \\ []), to: Ortex.Model
+  defdelegate load(path, eps \\ [:cpu], opt \\ 3, opts \\ []), to: Ortex.Model
+
+  @doc """
+  Same as `load/4` but returns the model directly, raising `Ortex.Error` on failure.
+
+  This was `load/4`'s behaviour before it returned a tagged tuple.
+
+  ## Examples
+
+      iex> match?(%Ortex.Model{}, Ortex.load!("./models/tinymodel.onnx"))
+      true
+
+  """
+  defdelegate load!(path, eps \\ [:cpu], opt \\ 3, opts \\ []), to: Ortex.Model
 
   @doc """
   Run a forward pass through a model.
@@ -62,9 +82,12 @@ defmodule Ortex do
 
   If there is only one input you can optionally pass a bare tensor rather than a tuple.
 
+  Raises `Ortex.Error` when the tensors do not fit the model (`:invalid_input`) or ONNX
+  Runtime refuses the run (`:onnxruntime`).
+
   ## Examples
 
-      iex> model = Ortex.load("./models/tinymodel.onnx")
+      iex> model = Ortex.load!("./models/tinymodel.onnx")
       iex> {%Nx.Tensor{shape: {1, 10}},
       ...>  %Nx.Tensor{shape: {1, 10}},
       ...>  %Nx.Tensor{shape: {1, 10}}} = Ortex.run(

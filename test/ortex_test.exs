@@ -4,7 +4,7 @@ defmodule OrtexTest do
 
   @tag :resnet50
   test "resnet50" do
-    model = Ortex.load("./models/resnet50.onnx")
+    model = Ortex.load!("./models/resnet50.onnx")
 
     input = Nx.broadcast(0.0, {1, 3, 224, 224})
     {output} = Ortex.run(model, {input})
@@ -15,7 +15,7 @@ defmodule OrtexTest do
 
   @tag :resnet50
   test "Nx.Serving with resnet50" do
-    model = Ortex.load("./models/resnet50.onnx")
+    model = Ortex.load!("./models/resnet50.onnx")
 
     serving = Nx.Serving.new(Ortex.Serving, model)
     batch = Nx.Batch.stack([{Nx.broadcast(0.0, {3, 224, 224})}])
@@ -24,7 +24,7 @@ defmodule OrtexTest do
   end
 
   test "Nx.Serving with tinymodel" do
-    model = Ortex.load("./models/tinymodel.onnx")
+    model = Ortex.load!("./models/tinymodel.onnx")
 
     serving = Nx.Serving.new(Ortex.Serving, model)
 
@@ -43,7 +43,7 @@ defmodule OrtexTest do
   end
 
   test "inspect/1 describes elementary types and dynamic axes as nil" do
-    model = Ortex.load("./models/tinymodel.onnx")
+    model = Ortex.load!("./models/tinymodel.onnx")
 
     assert inspect(model) == """
            #Ortex.Model<
@@ -53,7 +53,7 @@ defmodule OrtexTest do
   end
 
   test "serving forces the Evaluator compiler over an inherited EXLA default" do
-    model = Ortex.load("./models/tinymodel.onnx")
+    model = Ortex.load!("./models/tinymodel.onnx")
 
     # What Nx.Serving.new/3 builds when the host app set `config :nx,
     # :default_defn_options, compiler: EXLA`: EXLA plus its device selection.
@@ -71,16 +71,18 @@ defmodule OrtexTest do
   test "a failed QNN plugin registration is not cached" do
     missing = Path.join(System.tmp_dir!(), "no-such-qnn-#{System.unique_integer([:positive])}.so")
 
-    assert_raise RuntimeError, ~r/not found at/, fn ->
-      Ortex.load("./models/tinymodel.onnx", [:qnn], 3, provider_path: missing)
-    end
+    assert {:error, %Ortex.Error{reason: :qnn, provider: :qnn, detail: detail}} =
+             Ortex.load("./models/tinymodel.onnx", [:qnn], 3, provider_path: missing)
+
+    assert detail =~ "not found at"
 
     # A retry reaches registration instead of replaying the first error, which is what
     # lets a Nerves device load the QNN libraries after the first attempt failed.
-    assert_raise RuntimeError, ~r/failed to register QNN plugin EP/, fn ->
-      Ortex.load("./models/tinymodel.onnx", [:qnn], 3,
-        provider_path: Path.expand("./models/tinymodel.onnx")
-      )
-    end
+    assert {:error, %Ortex.Error{reason: :qnn, detail: detail}} =
+             Ortex.load("./models/tinymodel.onnx", [:qnn], 3,
+               provider_path: Path.expand("./models/tinymodel.onnx")
+             )
+
+    assert detail =~ "failed to register QNN plugin EP"
   end
 end

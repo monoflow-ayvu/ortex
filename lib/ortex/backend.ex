@@ -105,7 +105,9 @@ defmodule Ortex.Backend do
   @impl true
   def concatenate(out, tensors, axis) do
     if not Enum.all?(tensors, fn t -> t.type == out.type end) do
-      raise "Ortex does not currently support concatenation of vectors with differing types."
+      raise Ortex.Error,
+        reason: :invalid_input,
+        detail: "Ortex does not currently support concatenation of vectors with differing types."
     end
 
     tensor_refs =
@@ -118,7 +120,7 @@ defmodule Ortex.Backend do
     %{out | data: %B{ref: unwrap!(Ortex.Native.concatenate(tensor_refs, type, axis))}}
   end
 
-  defp unwrap!({:error, msg}), do: raise(msg)
+  defp unwrap!({:error, reason}), do: raise(Ortex.Error.from_nif(reason))
   defp unwrap!(ref), do: ref
 
   if Application.compile_env(:ortex, :add_backend_on_inspect, true) do
