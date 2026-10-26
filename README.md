@@ -87,6 +87,36 @@ Ortex.RunOptions.terminate(options)  # from a timeout or a cancellation request
 boundary; the run raises `Ortex.Error` with reason `:onnxruntime`. `unterminate/1` resets
 the flag, and one handle used by several runs terminates all of them.
 
+### Thread pools and memory
+
+Every `Ortex.load/4` creates its own ONNX Runtime session, and a session creates its own
+thread pools: `intra_op` defaults to one thread per core, `inter_op` to another one. Those
+threads are not BEAM processes - they do not show up in `:erlang.system_info(:process_count)`
+and the scheduler does not know about them - but they compete for the same cores. Loading
+three models on a 6-core board means roughly 18 ONNX Runtime threads before any inference
+runs, and `sessions: N` multiplies them again because each pooled session builds its own
+pools.
+
+So:
+
+  * one model per task, and `threads: [intra: n]` set deliberately when the default (all
+    cores) is not what you want;
+  * on an accelerator EP, `threads: [intra: 1, intra_op_spinning: false]` beats the default:
+    the measured case in `native/ortex/src/model.rs` is 24 -> 20.6 fps on a Dragon Q6A, where
+    idle spinning workers heated the package until it throttled the NPU doing the work. This
+    is already the default when `:qnn` is requested;
+  * `sessions: N` is for concurrency, not throughput per inference: size it to the cores you
+    can afford, not to the number of callers.
+
+Tensor data lives on the Rust heap, so the same is true of memory: `:erlang.memory/0` does
+not see it and the collector feels no pressure from it. `Ortex.memory/0` reports it, and
+`Ortex.Memory.poll/0` emits it as `[:ortex, :memory]` for whatever poller your app already
+runs.
+
+ONNX Runtime 1.24+ (the `ort` crate we use included) can build one global thread pool shared
+by every session instead; that would change the defaults above and is a deliberate follow-up,
+not something to switch on silently.
+
 ## Installation
 
 `Ortex` can be installed by adding `ortex` to your list of dependencies in `mix.exs`:
@@ -211,3 +241,80 @@ against the precompiled artifacts on each of them, publishes `v<version>` with t
 artifacts, and opens a PR with the generated `checksum-Elixir.Ortex.Native.exs` - that
 file is what lets consumers verify the download, so it is merged like any other change
 rather than pushed to `main` by the bot.
+
+## QNN plugin library
+
+The QNN execution provider is a *plugin* EP in current ONNX Runtime. It is not built into
+`libonnxruntime.so` from the ONNX Runtime releases, and it is not built into this NIF either:
+it is a separate shared library that Ortex registers with the runtime at session creation.
+
+`libonnxruntime_providers_qnn.so` comes from the **`onnxruntime/onnxruntime-qnn`** project
+(the Qualcomm-maintained plugin EP), not from `microsoft/onnxruntime`:
+
+| plugin | ships `libonnxruntime_providers_qnn.so` for | QAIRT SDK | works with ORT |
+|---|---|---|---|
+| 2.0.0 | Windows ARM64 | 2.x | >= 1.24.1 |
+| 2.1.0 | Windows ARM64, Linux ARM64 (preview) | 2.45.40 | >= 1.24.1 |
+| 2.1.1 | Windows ARM64, **Linux ARM64 (tgz + wheels)** | 2.45.41 | >= 1.24.1 |
+| 2.2.0 | + Linux ARM64 | 2.46.0 | >= 1.24.1 |
+| 2.3.0 | + Linux x86_64 wheels (preview) | 2.47.0 | >= 1.24.1 |
+| 2.4.0 | + **Linux x86_64 tgz + wheels** | 2.48.40 | >= 1.24.1 |
+| 2.5.0 | same | 2.49.40 | >= 1.24.1 |
+| 2.6.0 | same | 2.50.40 | >= 1.24.1 |
+| 2.7.0 | same | 2.51.0 | >= 1.24.1 |
+
+(From the release notes of each plugin version. `>= 1.24.1` is the EP ABI version the plugin
+requires; the QAIRT column is the SDK the plugin was built and tested against.)
+
+`libQnnHtp.so` - the backend the QNN EP dispatches to - comes from the **Qualcomm AI Runtime
+SDK (QAIRT)**, installed on the device or taken from the same plugin package where it is
+bundled. On a Nerves board it has to be part of the system image; on Debian both libraries
+are typically under `/usr/lib`.
+
+Ortex looks in `/usr/lib/libonnxruntime_providers_qnn.so` and `/usr/lib/libQnnHtp.so` by
+default, overridable per load or through the environment:
+
+```elixir
+Ortex.load!("./models/model.onnx", [:qnn], 3,
+  qnn: [
+    provider_path: "/data/ortex/lib/libonnxruntime_providers_qnn.so",
+    backend_path: "/data/ortex/lib/libQnnHtp.so",
+    htp_arch: 68
+  ],
+  env: %{"DSP_LIBRARY_PATH" => "/usr/lib/rfsa/adsp"}
+)
+```
+
+```sh
+ORTEX_QNN_PROVIDER_PATH=... ORTEX_QNN_BACKEND_PATH=... mix test
+```
+
+`htp_arch` is effectively required on HTP targets - without it the EP logs "Failed to get HTP
+arch" and the graph ends up on the CPU at roughly 1/35th the speed. `68` is V68, the arch of
+the QCS6490 used on the Dragon Q6A. `env:` exists because QNN's own libraries call `getenv()`,
+and `System.put_env/2` only writes Erlang's table.
+
+Every failure here is an error, never a CPU fallback: a QNN session that quietly runs on the
+CPU looks identical to a working one apart from being slower.
+
+## About this fork
+
+This is `monoflow-ayvu/ortex`, a fork of the Elixir ONNX Runtime bindings formerly maintained
+as [`elixir-nx/ortex`](https://github.com/elixir-nx/ortex) (last upstream commit 2026-02-10,
+last upstream Hex release 0.1.10 on Nx 0.6).
+
+The contract:
+
+  * **No automatic sync with upstream.** Upstream is not tracked, rebased or merged; the
+    differences from it are the point of the fork (Nx 1.x, `ort` 2.0 rc.15, the session pool,
+    the QNN plugin path, the precompiled NIF pipeline). Divergence is recorded here and in
+    `CHANGELOG.md`, not implied to be temporary.
+  * **Versioning is independent.** `mix.exs` and `native/ortex/Cargo.toml` carry the same
+    version and are bumped by hand; tags look like `v0.4.0`. Breaking API changes get a
+    minor bump while the major version is 0, and are listed under "Changed"/"Removed" in the
+    changelog.
+  * **Not published on Hex.** The `ortex` package name on Hex belongs to upstream, so
+    consumers depend on this fork by git reference. Whether to publish under another name is
+    an open product decision, not a property of this code.
+  * **Packages on the upstream name are not this project.** `{:ortex, "~> 0.1"}` from Hex is
+    upstream's; this fork's `source_url`, `homepage_url` and package links point here.

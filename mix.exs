@@ -16,8 +16,11 @@ defmodule Ortex.MixProject do
       homepage_url: "https://github.com/monoflow-ayvu/ortex",
       docs: [
         main: "readme",
-        extras: ["README.md"]
+        extras: ["README.md", "CHANGELOG.md"]
       ],
+      # `mix docs` is a dev-only task; naming it here means it runs in the env that has
+      # ex_doc, without passing MIX_ENV=dev by hand.
+      preferred_cli_env: [docs: :dev],
       package: package()
     ]
   end
