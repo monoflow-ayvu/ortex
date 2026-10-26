@@ -2,7 +2,7 @@
 //! [Nx](https://hexdocs.pm/nx) backend.
 
 use crate::constants::*;
-use crate::tensor::OrtexTensor;
+use crate::tensor::{OrtexTensor, TensorResource};
 use ndarray::{Array, IxDyn};
 
 use rustler::types::Binary;
@@ -59,11 +59,11 @@ pub fn from_binary(
     shape: Vec<usize>,
     dtype_str: String,
     dtype_bits: usize,
-) -> Result<ResourceArc<OrtexTensor>, String> {
+) -> Result<ResourceArc<TensorResource>, String> {
     // `typ` is the element type, `ort_tensor_kind` the matching OrtexTensor variant
     macro_rules! tensor {
         ($typ:ty, $ort_tensor_kind:ident) => {
-            Ok(ResourceArc::new(OrtexTensor::$ort_tensor_kind(
+            Ok(TensorResource::new(OrtexTensor::$ort_tensor_kind(
                 array_from_binary::<$typ>(&bin, &shape)?.into_shared(),
             )))
         };
@@ -92,7 +92,7 @@ pub fn from_binary(
 /// by the BinaryBackend of Nx.
 pub fn to_binary<'a>(
     env: Env<'a>,
-    reference: ResourceArc<OrtexTensor>,
+    reference: ResourceArc<TensorResource>,
     bits: usize,
     limit: usize,
 ) -> NifResult<Binary<'a>> {

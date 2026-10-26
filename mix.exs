@@ -34,6 +34,9 @@ defmodule Ortex.MixProject do
       {:rustler, "~> 0.38", optional: true},
       {:rustler_precompiled, "~> 0.10"},
       {:nx, "~> 1.0"},
+      # Ortex.Memory emits [:ortex, :memory]; nx already depends on telemetry, so this is
+      # a declaration, not new weight.
+      {:telemetry, "~> 0.4.0 or ~> 1.0"},
       {:tokenizers, "~> 0.5", only: :dev},
       {:ex_doc, "~> 0.40.4", only: :dev, runtime: false},
       {:exla, "~> 1.0", only: :dev},

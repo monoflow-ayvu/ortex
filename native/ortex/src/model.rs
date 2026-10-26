@@ -1,7 +1,7 @@
 //! Abstractions for creating an ONNX Runtime Session and Environment which can be safely
 //! passed to and from the BEAM.
 
-use crate::tensor::OrtexTensor;
+use crate::tensor::{OrtexTensor, TensorResource};
 use crate::utils::{is_bool_input, map_opt_level};
 use std::convert::TryInto;
 use std::iter::zip;
@@ -444,13 +444,13 @@ fn describe(outlets: &[Outlet]) -> IoSpec {
 
 /// One output of `run`: the tensor plus the metadata the BEAM side needs to build an
 /// `Nx.Tensor` around it (shape, dtype atom, dtype bits).
-pub type RunOutput = (ResourceArc<OrtexTensor>, Vec<usize>, Atom, usize);
+pub type RunOutput = (ResourceArc<TensorResource>, Vec<usize>, Atom, usize);
 
 /// Runs the model with the given inputs. Returns a vector of tensors. Use `model::show`
 /// to see what the model expects for input and output shapes.
 pub fn run(
     model: ResourceArc<OrtexModel>,
-    inputs: Vec<ResourceArc<OrtexTensor>>,
+    inputs: Vec<ResourceArc<TensorResource>>,
 ) -> Result<Vec<RunOutput>, Error> {
     let mut session = acquire(&model.sessions, &model.next);
 
@@ -489,7 +489,7 @@ pub fn run(
     for (index, elixir_input) in inputs.iter().enumerate() {
         let value: SessionInputValue = match &boolified[index] {
             Some(converted) => converted.try_into()?,
-            None => (&**elixir_input).try_into()?,
+            None => (&***elixir_input).try_into()?,
         };
         ortified_inputs.push(value);
     }
@@ -520,7 +520,7 @@ pub fn run(
         let shape = ortex_tensor.shape();
         let (dtype, bits) = ortex_tensor.dtype();
 
-        collected_outputs.push((ResourceArc::new(ortex_tensor), shape, dtype, bits))
+        collected_outputs.push((TensorResource::new(ortex_tensor), shape, dtype, bits))
     }
 
     Ok(collected_outputs)

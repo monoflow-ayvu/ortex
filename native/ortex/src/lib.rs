@@ -10,7 +10,7 @@ mod tensor;
 mod utils;
 
 use model::{IoSpec, RunOutput};
-use tensor::OrtexTensor;
+use tensor::TensorResource;
 
 use rustler::types::Binary;
 use rustler::{Atom, Env, NifResult, ResourceArc, Term};
@@ -46,13 +46,13 @@ fn show_session(model: ResourceArc<model::OrtexModel>) -> NifResult<(IoSpec, IoS
 #[rustler::nif(schedule = "DirtyCpu")]
 fn run(
     model: ResourceArc<model::OrtexModel>,
-    inputs: Vec<ResourceArc<OrtexTensor>>,
+    inputs: Vec<ResourceArc<TensorResource>>,
 ) -> NifResult<Vec<RunOutput>> {
     model::run(model, inputs).map_err(nif_error)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn from_binary(bin: Binary, shape: Term, dtype: Term) -> NifResult<ResourceArc<OrtexTensor>> {
+fn from_binary(bin: Binary, shape: Term, dtype: Term) -> NifResult<ResourceArc<TensorResource>> {
     let shape: Vec<usize> = rustler::types::tuple::get_tuple(shape)?
         .iter()
         .map(|x| -> NifResult<usize> { Ok(x.decode::<usize>())? })
@@ -66,21 +66,30 @@ fn from_binary(bin: Binary, shape: Term, dtype: Term) -> NifResult<ResourceArc<O
 #[rustler::nif(schedule = "DirtyCpu")]
 fn to_binary<'a>(
     env: Env<'a>,
-    reference: ResourceArc<OrtexTensor>,
+    reference: ResourceArc<TensorResource>,
     bits: usize,
     limit: usize,
 ) -> NifResult<Binary<'a>> {
     utils::to_binary(env, reference, bits, limit)
 }
 
+/// Bytes of tensor data currently held by live `OrtexTensor` resources.
+///
+/// Everything the BEAM sees as an Ortex tensor lives on the Rust heap, invisible to
+/// `:erlang.memory/0` and to the collector; this is the number that makes it visible.
+#[rustler::nif]
+fn memory_usage() -> usize {
+    tensor::allocated_bytes()
+}
+
 #[rustler::nif]
 pub fn slice(
-    tensor: ResourceArc<OrtexTensor>,
+    tensor: ResourceArc<TensorResource>,
     start_indicies: Vec<isize>,
     lengths: Vec<isize>,
     strides: Vec<isize>,
-) -> NifResult<ResourceArc<OrtexTensor>> {
-    Ok(ResourceArc::new(tensor.slice(
+) -> NifResult<ResourceArc<TensorResource>> {
+    Ok(TensorResource::new(tensor.slice(
         start_indicies,
         lengths,
         strides,
@@ -89,23 +98,23 @@ pub fn slice(
 
 #[rustler::nif]
 pub fn reshape(
-    tensor: ResourceArc<OrtexTensor>,
+    tensor: ResourceArc<TensorResource>,
     shape: Vec<usize>,
-) -> NifResult<ResourceArc<OrtexTensor>> {
-    Ok(ResourceArc::new(tensor.reshape(shape)?))
+) -> NifResult<ResourceArc<TensorResource>> {
+    Ok(TensorResource::new(tensor.reshape(shape)?))
 }
 
 #[rustler::nif]
 pub fn concatenate(
-    tensors: Vec<ResourceArc<OrtexTensor>>,
+    tensors: Vec<ResourceArc<TensorResource>>,
     dtype: Term,
     axis: i32,
-) -> NifResult<ResourceArc<OrtexTensor>> {
+) -> NifResult<ResourceArc<TensorResource>> {
     let (dtype_t, dtype_bits): (Term, usize) = dtype.decode()?;
     let dtype_str = dtype_t.atom_to_string()?;
     let concatted =
         tensor::concatenate(tensors, (&dtype_str, dtype_bits), axis as usize).map_err(nif_error)?;
-    Ok(ResourceArc::new(concatted))
+    Ok(TensorResource::new(concatted))
 }
 
 rustler::init!("Elixir.Ortex.Native");
