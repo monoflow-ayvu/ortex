@@ -5,7 +5,8 @@ use crate::tensor::OrtexTensor;
 use crate::utils::{is_bool_input, map_opt_level};
 use std::convert::TryInto;
 use std::iter::zip;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use ort::execution_providers::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
@@ -14,14 +15,42 @@ use ort::value::{Outlet, ValueType};
 use ort::Error;
 use rustler::{Atom, Resource, ResourceArc};
 
-/// Holds the model state which include onnxruntime session and environment. All
+/// Holds the model state which include onnxruntime sessions and environment. All
 /// are threadsafe so this can be called concurrently from the beam.
 pub struct OrtexModel {
-    pub session: Mutex<Session>,
+    /// Ort sessions are exclusive - `Session::run` takes `&mut self` - so real
+    /// concurrency comes from a pool of sessions over the *same* graph, not from more
+    /// callers. `sessions: N` in `Ortex.load/4` sizes the pool; 1 is the historical
+    /// behaviour. The graph is loaded once per session, so the extra memory is one set
+    /// of thread pools and per-session allocations per unit of N.
+    sessions: Vec<Mutex<Session>>,
+    /// Round-robin cursor over `sessions`.
+    next: AtomicUsize,
     /// Input/output specs, captured once at load time. They are immutable for the
-    /// lifetime of the session, so describing a model never has to take the session
+    /// lifetime of the sessions, so describing a model never has to take a session
     /// lock - which is held for the whole duration of `run`.
     pub io_spec: (IoSpec, IoSpec),
+}
+
+/// Takes a session from the pool: round-robin from `next`, preferring a free slot.
+///
+/// `try_lock` first so a caller never queues behind a busy session while another is idle,
+/// and a plain blocking `lock` only when all of them are busy - spinning over the pool
+/// would just burn the dirty scheduler. A poisoned mutex is recovered, not propagated: the
+/// panic that poisoned it happened in some earlier inference, not in this one.
+fn acquire<'a>(sessions: &'a [Mutex<Session>], next: &AtomicUsize) -> MutexGuard<'a, Session> {
+    let len = sessions.len();
+    let start = next.fetch_add(1, Ordering::Relaxed) % len;
+
+    for offset in 0..len {
+        match sessions[(start + offset) % len].try_lock() {
+            Ok(guard) => return guard,
+            Err(TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {}
+        }
+    }
+
+    sessions[start].lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[rustler::resource_impl(name = "OrtexModel")]
@@ -47,6 +76,7 @@ const RESERVED: &[&str] = &[
     "inter_threads",
     "intra_op_spinning",
     "inter_op_spinning",
+    "sessions",
 ];
 
 fn parse_usize(key: &str, value: &str) -> Result<usize, Error> {
@@ -217,9 +247,18 @@ pub fn init(
 
     init_tracing(&qnn_opts);
 
-    let mut builder = Session::builder()?
-        .with_optimization_level(map_opt_level(opt))?
-        .with_execution_providers(eps)?;
+    // `sessions` sizes the pool. It is read here, not forwarded to the QNN EP.
+    let session_count = match lookup(&qnn_opts, "sessions") {
+        Some(value) => parse_usize("sessions", &value)?,
+        None => 1,
+    };
+    if session_count == 0 {
+        return Err(Error::new("sessions must be at least 1, got 0"));
+    }
+
+    // Everything below builds one session; the loop builds `session_count` of them from
+    // the same configuration, so the pool is N copies of the *same* graph.
+    let mut log_level: Option<ort::logging::LogLevel> = None;
 
     // Raising the *environment* log level is not enough to get the node-placement
     // report - the one line that answers "did QNN actually claim this graph". That
@@ -227,7 +266,7 @@ pub fn init(
     // lowered too. Tie it to the trace request: asking for a trace means asking for
     // the diagnosis.
     if tracing_requested(&qnn_opts) {
-        builder = builder.with_log_level(ort::logging::LogLevel::Verbose)?;
+        log_level = Some(ort::logging::LogLevel::Verbose);
     }
 
     // Thread-pool shape. This matters far more than it looks on an accelerator:
@@ -279,30 +318,51 @@ pub fn init(
         }
     }
 
-    if let Some(value) = intra_threads {
-        builder = builder.with_intra_threads(value)?;
-    }
-    if let Some(value) = inter_threads {
-        builder = builder.with_inter_threads(value)?;
-    }
-    if let Some(value) = intra_op_spinning {
-        builder = builder.with_intra_op_spinning(value)?;
-    }
-    if let Some(value) = inter_op_spinning {
-        builder = builder.with_inter_op_spinning(value)?;
-    }
+    // One builder chain, run once per pooled session. `commit_from_file` consumes the
+    // builder, so the chain has to live in a closure rather than be reused.
+    let build_session = || -> Result<Session, Error> {
+        let mut builder = Session::builder()?
+            .with_optimization_level(map_opt_level(opt))?
+            .with_execution_providers(eps.as_slice())?;
 
-    let mut builder = if use_qnn {
-        with_qnn(builder, &qnn_opts)?
-    } else {
-        builder
+        if let Some(level) = log_level {
+            builder = builder.with_log_level(level)?;
+        }
+        if let Some(value) = intra_threads {
+            builder = builder.with_intra_threads(value)?;
+        }
+        if let Some(value) = inter_threads {
+            builder = builder.with_inter_threads(value)?;
+        }
+        if let Some(value) = intra_op_spinning {
+            builder = builder.with_intra_op_spinning(value)?;
+        }
+        if let Some(value) = inter_op_spinning {
+            builder = builder.with_inter_op_spinning(value)?;
+        }
+        let mut builder = if use_qnn {
+            with_qnn(builder, &qnn_opts)?
+        } else {
+            builder
+        };
+
+        builder.commit_from_file(&model_path)
     };
 
-    let session = builder.commit_from_file(model_path)?;
-    let io_spec = (describe(session.inputs()), describe(session.outputs()));
+    let mut sessions = Vec::with_capacity(session_count);
+    for _ in 0..session_count {
+        sessions.push(Mutex::new(build_session()?));
+    }
+
+    // The graph is the same in every pooled session, so one spec describes the model.
+    let io_spec = {
+        let first = sessions[0].lock().unwrap_or_else(|e| e.into_inner());
+        (describe(first.inputs()), describe(first.outputs()))
+    };
 
     Ok(OrtexModel {
-        session: Mutex::new(session),
+        sessions,
+        next: AtomicUsize::new(0),
         io_spec,
     })
 }
@@ -346,7 +406,7 @@ pub fn run(
     model: ResourceArc<OrtexModel>,
     inputs: Vec<ResourceArc<OrtexTensor>>,
 ) -> Result<Vec<(ResourceArc<OrtexTensor>, Vec<usize>, Atom, usize)>, Error> {
-    let mut session = model.session.lock().unwrap_or_else(|e| e.into_inner());
+    let mut session = acquire(&model.sessions, &model.next);
 
     let output_names: Vec<String> = session
         .outputs()

@@ -49,6 +49,17 @@ iex> result |> Nx.backend_transfer() |> Nx.argmax(axis: 1)
 >
 ```
 
+An ONNX Runtime session is exclusive, so with the default `sessions: 1` concurrent
+inferences on the same model queue behind each other - `Nx.Serving` partitions organise a
+queue, they do not add parallelism. `sessions: N` loads N sessions of the *same* graph and
+round-robins inferences over them:
+
+```elixir
+model = Ortex.load("./models/resnet50.onnx", [:cpu], 3, sessions: 4)
+```
+
+Each pooled session loads the graph and its own thread pools, so N is bounded by memory.
+
 ## Installation
 
 `Ortex` can be installed by adding `ortex` to your list of dependencies in `mix.exs`:

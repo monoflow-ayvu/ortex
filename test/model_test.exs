@@ -56,6 +56,33 @@ defmodule Ortex.TestModel do
     assert b2[1] == alone2_b[0]
   end
 
+  test "sessions: N loads a pool and concurrent runs stay correct" do
+    model = Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: 4)
+
+    results =
+      1..16
+      |> Enum.map(fn row -> Task.async(fn -> {row, run!(model, inputs(row))} end) end)
+      |> Task.await_many(30_000)
+
+    for {row, [o1, o2, o3]} <- results do
+      assert Nx.shape(o1) == {1, 10}
+      assert Nx.shape(o2) == {1, 10}
+      assert Nx.shape(o3) == {1, 10}
+      # Each pooled session must produce the same numbers for the same input.
+      assert Nx.to_flat_list(o1) == Nx.to_flat_list(run!(model, inputs(row)) |> hd())
+    end
+  end
+
+  test "sessions: 0 is rejected instead of deadlocking on an empty pool" do
+    assert_raise RuntimeError, ~r/sessions must be at least 1, got 0/, fn ->
+      Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: 0)
+    end
+
+    assert_raise RuntimeError, ~r/sessions must be a non-negative integer/, fn ->
+      Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: "four")
+    end
+  end
+
   test "an optimization level of 0 still produces a usable session", %{model: model} do
     unoptimized = Ortex.load("./models/tinymodel.onnx", [:cpu], 0)
 
