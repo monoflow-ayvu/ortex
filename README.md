@@ -69,6 +69,19 @@ path at runtime, or set `ORT_LIB_LOCATION` at compile time to have it copied int
 `priv/native` (where the `$ORIGIN` rpath finds it). Nerves system images provide it
 system-wide. Model loads without it fail; tests need it too.
 
+## Testing
+
+`mix test` runs the suite against `models/tinymodel.onnx`, the small model committed to
+the repo: inference, `Nx.Serving` (batching and partitioned), shape/dtype contracts and the
+Rustler error paths. No download or export step is needed.
+
+The `resnet50` tests are opt-in because their weights are not in the repo
+(`python/export_resnet.py` exports them). With `models/resnet50.onnx` present:
+
+```sh
+ORTEX_RESNET50=1 mix test
+```
+
 ## Execution Providers
 
 Non-CPU execution providers are compiled in through `ort`'s cargo features. The default
