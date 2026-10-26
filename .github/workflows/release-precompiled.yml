@@ -5,14 +5,27 @@ on:
     branches: [main]
     paths-ignore:
       - "checksum-*.exs"
+      - "*.md"
   workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: precompiled-release
   cancel-in-progress: false
+
+# What the published artifact contains: the CPU execution provider and nothing else.
+# Execution providers are cargo features now, and `--no-default-features` keeps them out
+# on purpose - a single artifact per target cannot carry CUDA *and* DirectML *and* CoreML,
+# and RustlerPrecompiled never runs `use Rustler`, so a consumer's
+# `config :ortex, Ortex.Native, features: [...]` has no effect on a downloaded NIF.
+# Anyone who needs another provider builds from source (force_build + ORTEX_FEATURES).
+# `test` below proves this: the suite asserts that requesting an uncompiled provider
+# raises.
+env:
+  ONNXRUNTIME_VERSION: "1.24.4"
 
 jobs:
   version:
@@ -65,7 +78,8 @@ jobs:
           workspaces: native/ortex
       - name: Build NIF
         working-directory: native/ortex
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        # CPU only - see the note at the top of this file.
+        run: cargo build --locked --release --no-default-features --target ${{ matrix.target }}
       - name: Package artifact
         env:
           VERSION: ${{ needs.version.outputs.version }}
@@ -81,7 +95,6 @@ jobs:
           tar -czf "dist/${lib}.so.tar.gz" -C dist "${lib}.so"
           rm "dist/${lib}.so"
           [ "$(tar -tzf dist/${lib}.so.tar.gz)" = "${lib}.so" ]
-          sha256sum "dist/${lib}.so.tar.gz" | awk '{print $1}' > "dist/${lib}.so.tar.gz.sha256"
       - uses: actions/upload-artifact@v7
         with:
           name: nif-${{ matrix.target }}
@@ -89,8 +102,72 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  release:
+  # Gate: the exact artifacts that will be published are the ones tested, on the same
+  # runner OS/arch they were built for. Without this a version bump tagged whatever the
+  # build produced, untested.
+  test:
     needs: [version, build]
+    if: needs.version.outputs.release_needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v6
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.1.2"
+          elixir-version: "1.17.3"
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: nif-*
+          path: dist
+          merge-multiple: true
+      - name: Write checksum file for the artifacts
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: python3 .github/scripts/checksum_nifs.py dist "${VERSION}"
+      # Seed rustler_precompiled's cache with the artifact instead of downloading it: the
+      # release does not exist yet at this point.
+      - name: Seed precompiled NIF cache
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/nif-cache"
+          cp "dist/libortex-v${VERSION}-nif-2.15-${TARGET}.so.tar.gz" "${RUNNER_TEMP}/nif-cache/"
+          echo "RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH=${RUNNER_TEMP}/nif-cache" >> "${GITHUB_ENV}"
+      - name: Install ONNX Runtime
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz" | tar -xz
+          echo "ORT_DYLIB_PATH=${GITHUB_WORKSPACE}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so" >> "${GITHUB_ENV}"
+      - name: Install dependencies
+        run: mix deps.get
+      # One step on purpose: the flag feeds a compile-time config value, so compile and
+      # test have to see the same environment.
+      - name: Compile and test against the precompiled NIF
+        run: |
+          set -euo pipefail
+          export ORTEX_USE_PRECOMPILED=1
+          mix compile 2>&1 | tee compile.log
+          # The artifact has to be what runs: a source build would mask a broken package.
+          if grep -q "Compiling crate ortex" compile.log; then
+            echo "the crate was built from source instead of loading the precompiled NIF"
+            exit 1
+          fi
+          mix test
+
+  release:
+    needs: [version, build, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -104,36 +181,10 @@ jobs:
       - name: Generate checksum-Elixir.Ortex.Native.exs
         env:
           VERSION: ${{ needs.version.outputs.version }}
-        shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import glob, hashlib, os
-          version = os.environ["VERSION"]
-          paths = sorted(glob.glob(f"dist/*-v{version}-*.so.tar.gz"))
-          if not paths:
-              raise SystemExit(f"no artifacts matching dist/*-v{version}-*.so.tar.gz")
-          with open("checksum-Elixir.Ortex.Native.exs", "w") as f:
-              f.write("%{\n")
-              for path in paths:
-                  digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
-                  f.write(f'  "{os.path.basename(path)}" => "sha256:{digest}",\n')
-              f.write("}\n")
-          PY
+          python3 .github/scripts/checksum_nifs.py dist "${VERSION}"
           cat checksum-Elixir.Ortex.Native.exs
-      - name: Commit checksum and tag
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add checksum-Elixir.Ortex.Native.exs
-          git commit -m "checksum: precompiled NIFs for v${VERSION}"
-          git push origin HEAD:main
-          git tag "v${VERSION}"
-          git push origin "v${VERSION}"
       - name: Publish release assets
         uses: softprops/action-gh-release@v3
         with:
@@ -141,6 +192,36 @@ jobs:
           name: v${{ needs.version.outputs.version }}
           files: |
             dist/*.so.tar.gz
-            dist/*.so.tar.gz.sha256
             checksum-Elixir.Ortex.Native.exs
           fail_on_unmatched_files: true
+      # The checksum file is what makes the published artifacts verifiable, and it is
+      # shipped in the package - so it goes through a PR like any other change instead of
+      # being committed to main by the bot.
+      - name: Open checksum PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if git show origin/main:checksum-Elixir.Ortex.Native.exs | diff -q - checksum-Elixir.Ortex.Native.exs >/dev/null; then
+            echo "checksum on main already lists these artifacts; nothing to PR"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # A digest-suffixed branch keeps re-runs of the same version from needing a
+          # force push or leaving a stale PR behind.
+          suffix="$(sha256sum checksum-Elixir.Ortex.Native.exs | cut -c1-8)"
+          branch="release/checksum-v${VERSION}-${suffix}"
+          git checkout -b "${branch}"
+          git add checksum-Elixir.Ortex.Native.exs
+          git commit -m "checksum: precompiled NIFs for v${VERSION}"
+          git push origin "${branch}"
+          gh pr create \
+            --base main \
+            --head "${branch}" \
+            --title "checksum: precompiled NIFs for v${VERSION}" \
+            --body "Generated by the Release Precompiled NIF workflow after publishing v${VERSION}. Merging this is what makes the published artifacts verifiable by consumers (the file ships in the package)."
