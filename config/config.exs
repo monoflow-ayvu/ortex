@@ -23,6 +23,11 @@ ortex_features =
 
 config :ortex, Ortex.Native, features: ortex_features
 
-# Ortex itself always compiles the crate from source; precompiled artifacts are for
-# projects that depend on ortex.
-config :rustler_precompiled, :force_build, ortex: true
+# Ortex itself compiles the crate from source; precompiled artifacts are for projects that
+# depend on ortex. The release workflow sets ORTEX_USE_PRECOMPILED=1 to test the artifact it
+# is about to publish instead of a local build - and that variable is read at compile time,
+# so compile and test have to run with the same value or Mix complains about the changed
+# compile-time config.
+config :rustler_precompiled,
+       :force_build,
+       ortex: System.get_env("ORTEX_USE_PRECOMPILED") not in ["1", "true"]

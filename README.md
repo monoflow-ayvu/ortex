@@ -123,6 +123,12 @@ ortex downloads a precompiled NIF from the GitHub release matching its version; 
 toolchain is needed. On any other platform the crate builds from source, which requires
 Rust.
 
+Those precompiled NIFs contain the CPU execution provider only, and nothing else. A
+downloaded artifact never goes through `use Rustler`, so `config :ortex, Ortex.Native,
+features: [...]` has no effect on it - a CUDA/TensorRT/etc. binding needs a source build
+(see `force_build` below) with `ORTEX_FEATURES` set. Requesting such a provider from a
+CPU-only artifact raises instead of silently running the model on the CPU.
+
 To force a source build, add this to the consuming project's config:
 
 ```elixir
@@ -139,6 +145,9 @@ ORT_LIB_LOCATION=/path/to/onnxruntime/lib \
 mix compile
 ```
 
-Releases: bump `version` in both `mix.exs` and `native/ortex/Cargo.toml`, then push to
-`main`. The `Release Precompiled NIF` workflow tags `v<version>` and attaches the
-precompiled artifacts.
+Releases: bump `version` in both `mix.exs` and `native/ortex/Cargo.toml` in a PR and merge
+it. The `Release Precompiled NIF` workflow then builds both targets, runs `mix test`
+against the precompiled artifacts on each of them, publishes `v<version>` with the
+artifacts, and opens a PR with the generated `checksum-Elixir.Ortex.Native.exs` - that
+file is what lets consumers verify the download, so it is merged like any other change
+rather than pushed to `main` by the bot.
