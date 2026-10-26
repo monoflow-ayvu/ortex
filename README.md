@@ -18,8 +18,8 @@ TL;DR:
 ```elixir
 iex> model = Ortex.load("./models/resnet50.onnx")
 #Ortex.Model<
-  inputs: [{"input", "Float32", [nil, 3, 224, 224]}]
-  outputs: [{"output", "Float32", [nil, 1000]}]>
+  inputs: [{"input", "f32", [nil, 3, 224, 224]}]
+  outputs: [{"output", "f32", [nil, 1000]}]>
 iex> {output} = Ortex.run(model, Nx.broadcast(0.0, {1, 3, 224, 224}))
 iex> output |> Nx.backend_transfer() |> Nx.argmax
 #Nx.Tensor<

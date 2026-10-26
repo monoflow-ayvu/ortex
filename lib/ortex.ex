@@ -24,6 +24,12 @@ defmodule Ortex do
   regardless: the first writes an ORT trace, the second exports `NAME` into the OS
   environment, the only way QNN's own `getenv` calls can see it.
 
+  When `:qnn` is among `eps`, the thread pool defaults assume the graph is one offloaded NPU
+  node: `intra_threads: 1` and `intra_op_spinning: false`. The default pool's spinning workers
+  burn every core while the NPU runs, which measurably throttles the package (24 -> 20.6 fps
+  on a Dragon Q6A). Pass `intra_threads:` or `intra_op_spinning:` in `qnn_opts` to override,
+  and `inter_threads`/`inter_op_spinning` for CPU-side EPs, which keep onnxruntime's defaults.
+
   ## Examples
 
       iex> Ortex.load("./models/tinymodel.onnx")

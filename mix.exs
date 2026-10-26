@@ -11,8 +11,8 @@ defmodule Ortex.MixProject do
 
       # Docs
       name: "Ortex",
-      source_url: "https://github.com/elixir-nx/ortex",
-      homepage_url: "http://github.com/elixir-nx/ortex",
+      source_url: "https://github.com/monoflow-ayvu/ortex",
+      homepage_url: "https://github.com/monoflow-ayvu/ortex",
       docs: [
         main: "readme",
         extras: ["README.md"]
@@ -47,7 +47,7 @@ defmodule Ortex.MixProject do
         native/ortex/Cargo.lock native/ortex/Cargo.toml native/ortex/.cargo/config.toml
         checksum-*.exs),
       licenses: ["MIT"],
-      links: %{"GitHub" => "https://github.com/elixir-nx/ortex"},
+      links: %{"GitHub" => "https://github.com/monoflow-ayvu/ortex"},
       description: "ONNX Runtime bindings for Elixir"
     ]
   end

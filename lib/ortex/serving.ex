@@ -60,8 +60,19 @@ defmodule Ortex.Serving do
 
   @impl true
   def init(_inline_or_process, model, defn_options) do
-    # handle_batch/3 only jits an identity fn, so don't drag in a real defn compiler
-    defn_options = Enum.map(defn_options, &Keyword.put_new(&1, :compiler, Nx.Defn.Evaluator))
+    # handle_batch/3 only jits an identity fn, so don't drag in a real defn compiler.
+    # The options reaching us are Nx.Defn.default_options/0 merged with whatever the
+    # caller passed, so a host app configured with `compiler: EXLA` (the Nx-recommended
+    # setup for numeric projects) would otherwise make every batch round-trip through
+    # EXLA: one compilation per batch shape, plus a device transfer, to do nothing.
+    # `put`, not `put_new`, and drop the EXLA-specific device selection with it.
+    defn_options =
+      Enum.map(defn_options, fn opts ->
+        opts
+        |> Keyword.drop([:client, :device])
+        |> Keyword.put(:compiler, Nx.Defn.Evaluator)
+      end)
+
     {:ok, {fn x -> Ortex.run(model, x) end, defn_options}}
   end
 

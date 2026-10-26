@@ -41,4 +41,46 @@ defmodule OrtexTest do
     {%Nx.Tensor{shape: {3, 10}}, %Nx.Tensor{shape: {3, 10}}, %Nx.Tensor{shape: {3, 10}}} =
       Nx.Serving.run(serving, batch)
   end
+
+  test "inspect/1 describes elementary types and dynamic axes as nil" do
+    model = Ortex.load("./models/tinymodel.onnx")
+
+    assert inspect(model) == """
+           #Ortex.Model<
+             inputs: [{"x", "i32", [nil, 100]}, {"y", "f32", [nil, 100]}]
+             outputs: [{"output1", "f32", [nil, 10]}, {"output2", "f32", [nil, 10]}, {"output3", "f32", [nil, 10]}]>\
+           """
+  end
+
+  test "serving forces the Evaluator compiler over an inherited EXLA default" do
+    model = Ortex.load("./models/tinymodel.onnx")
+
+    # What Nx.Serving.new/3 builds when the host app set `config :nx,
+    # :default_defn_options, compiler: EXLA`: EXLA plus its device selection.
+    {:ok, {_run, [opts]}} =
+      Ortex.Serving.init(:inline, model, [
+        [compiler: EXLA, client: :cuda, device: 0, partitions: true]
+      ])
+
+    assert opts[:compiler] == Nx.Defn.Evaluator
+    assert opts[:partitions] == true
+    refute Keyword.has_key?(opts, :client)
+    refute Keyword.has_key?(opts, :device)
+  end
+
+  test "a failed QNN plugin registration is not cached" do
+    missing = Path.join(System.tmp_dir!(), "no-such-qnn-#{System.unique_integer([:positive])}.so")
+
+    assert_raise RuntimeError, ~r/not found at/, fn ->
+      Ortex.load("./models/tinymodel.onnx", [:qnn], 3, provider_path: missing)
+    end
+
+    # A retry reaches registration instead of replaying the first error, which is what
+    # lets a Nerves device load the QNN libraries after the first attempt failed.
+    assert_raise RuntimeError, ~r/failed to register QNN plugin EP/, fn ->
+      Ortex.load("./models/tinymodel.onnx", [:qnn], 3,
+        provider_path: Path.expand("./models/tinymodel.onnx")
+      )
+    end
+  end
 end
