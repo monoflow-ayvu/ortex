@@ -8,7 +8,7 @@ use std::iter::zip;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
-use ort::execution_providers::ExecutionProviderDispatch;
+use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
 use ort::session::{Session, SessionInputValue};
 use ort::value::{Outlet, ValueType};
@@ -158,7 +158,7 @@ fn init_tracing(qnn_opts: &[(String, String)]) {
 
     // Raise onnxruntime's own log level too - the node-placement report, which is
     // what tells you whether QNN claimed the graph, is only emitted at VERBOSE.
-    if let Ok(env) = ort::environment::current() {
+    if let Ok(env) = crate::utils::environment() {
         env.set_log_level(ort::logging::LogLevel::Verbose);
     }
 }
@@ -169,6 +169,7 @@ fn init_tracing(qnn_opts: &[(String, String)]) {
 /// here is an error rather than a silent CPU fallback - a QNN session that quietly runs
 /// on CPU looks identical to a working one apart from being slower.
 fn with_qnn(
+    env: &ort::environment::Environment,
     builder: SessionBuilder,
     qnn_opts: &[(String, String)],
 ) -> Result<SessionBuilder, Error> {
@@ -176,7 +177,6 @@ fn with_qnn(
         lookup(qnn_opts, "provider_path").unwrap_or_else(crate::utils::qnn_provider_path);
     crate::utils::register_qnn_library(&provider_path).map_err(Error::new)?;
 
-    let env = ort::environment::current()?;
     let backend_path =
         lookup(qnn_opts, "backend_path").unwrap_or_else(crate::utils::qnn_backend_path);
 
@@ -320,8 +320,10 @@ pub fn init(
 
     // One builder chain, run once per pooled session. `commit_from_file` consumes the
     // builder, so the chain has to live in a closure rather than be reused.
+    let environment = crate::utils::environment()?;
+
     let build_session = || -> Result<Session, Error> {
-        let mut builder = Session::builder()?
+        let mut builder = Session::builder(&environment)?
             .with_optimization_level(map_opt_level(opt))?
             .with_execution_providers(eps.as_slice())?;
 
@@ -341,7 +343,7 @@ pub fn init(
             builder = builder.with_inter_op_spinning(value)?;
         }
         let mut builder = if use_qnn {
-            with_qnn(builder, &qnn_opts)?
+            with_qnn(&environment, builder, &qnn_opts)?
         } else {
             builder
         };

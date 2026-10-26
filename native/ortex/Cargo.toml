@@ -11,10 +11,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.38.0"
-# rc.12, not rc.11, is the first release with Environment::register_ep_library - the
-# ORT >= 1.23 plugin-EP API, and the only way to reach the Qualcomm QNN EP through an
-# upstream libonnxruntime, which is not built with --use_qnn and so rejects "QNN" by
-# name with "QNN execution provider is not supported in this build."
+# rc.15 carries 30+ undefined-behaviour and leak fixes in the FFI layer - the kind of
+# debt that only shows up as corruption or slow growth in a process kept alive for weeks.
 #
 # default-features are off deliberately:
 #   * download-binaries would fetch a HOST-arch libonnxruntime, useless when
@@ -22,8 +20,13 @@ rustler = "0.38.0"
 #     script compiles host C with Nerves' cross CC and dies on `-m64`.
 #   * load-dynamic dlopen()s ORT_DYLIB_PATH instead - the libonnxruntime.so the
 #     nerves system installs.
-#   * api-24 implies api-22, which is what gates register_ep_library.
-ort = { version = "2.0.0-rc.12", default-features = false, features = [
+#   * api-24 pins the ONNX Runtime API level, not the crate version: ORT_API_VERSION 24
+#     is what ORT 1.24.x provides, which is what ci.yml installs and what the Nerves
+#     systems ship. request_api_version() asks the loaded runtime for exactly this
+#     level; bumping it (rc.13/14/15 default to 28/29/31) would require a runtime
+#     upgrade everywhere at once - that coordination is D2, not this change.
+#     api-24 implies api-22 (register_ep_library) and api-23.
+ort = { version = "2.0.0-rc.15", default-features = false, features = [
     "std",
     "ndarray",
     "half",
@@ -40,8 +43,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [features]
-# ONNXRuntime Execution providers
+# ONNXRuntime Execution providers.
+#
+# rc.13 put every EP struct behind one of these cargo features, so an EP missing here has
+# no binding at all: `Ortex.load(path, [:rocm])` without the feature fails with a message
+# naming it (utils::ep_not_compiled) instead of falling back to the CPU.
 directml = ["ort/directml"]
 coreml = ["ort/coreml"]
 cuda = ["ort/cuda"]
 tensorrt = ["ort/tensorrt"]
+acl = ["ort/acl"]
+onednn = ["ort/onednn"]
+rocm = ["ort/rocm"]

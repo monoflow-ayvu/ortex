@@ -11,12 +11,10 @@ defmodule Ortex do
   of descending priority and graph optimization level 1-3. Any graph optimization level
   beyond the range of 1-3 will disable graph optimization.
 
-  By default, `Ortex` only includes some of the supported execution providers of ONNX Runtime.
-  To enable others, first ensure you have downloaded or compiled a version of
-  `libonnxruntime` that includes them, then set the environment variable `ORT_LIB_LOCATION`
-  to its location. Then add `config :ortex, Ortex.Native, features: [EXECUTION_PROVIDERS]` to your
-  `config.exs` where `EXECUTION_PROVIDERS` is a list of strings of which execution providers
-  to enable.
+  CPU is always available. The other execution providers (CUDA, TensorRT, ACL, oneDNN, CoreML,
+  DirectML, ROCm) are compiled in through cargo features - see the README - and the library
+  that ships them has to be present too. Requesting a provider that was not compiled in raises
+  at load, naming the feature to rebuild with, rather than silently running on the CPU.
 
   `qnn_opts` configures the QNN execution provider. `backend_path` and `provider_path` pick
   the QNN libraries and any other key is forwarded as a QNN provider option (`htp_arch: 68`);
@@ -39,9 +37,15 @@ defmodule Ortex do
   ## Examples
 
       iex> Ortex.load("./models/tinymodel.onnx")
-      iex> Ortex.load("./models/tinymodel.onnx", [:cuda, :cpu])
       iex> Ortex.load("./models/tinymodel.onnx", [:cpu], 0)
       iex> Ortex.load("./models/tinymodel.onnx", [:cpu], 3, sessions: 4)
+
+  A provider list is ordered by priority, and only providers compiled into the NIF can be
+  requested:
+
+  ```elixir
+  Ortex.load("./models/resnet50.onnx", [:cuda, :cpu])
+  ```
 
   """
   defdelegate load(path, eps \\ [:cpu], opt \\ 3, qnn_opts \\ []), to: Ortex.Model
