@@ -417,6 +417,11 @@ pub fn run(
         .collect();
 
     let mut ortified_inputs: Vec<SessionInputValue> = Vec::new();
+    // Boolean inputs arrive as 0/1 u8 (that is how Nx sees them) and have to be rewritten
+    // into a bool tensor. The rewrite allocates, so its output has to outlive the
+    // SessionInputValue that points at it - hence a slot per input, filled before any
+    // conversion happens.
+    let mut boolified: Vec<Option<OrtexTensor>> = (0..inputs.len()).map(|_| None).collect();
 
     // Scoped so the borrow of the input specs ends before session.run() takes the
     // session mutably.
@@ -430,37 +435,48 @@ pub fn run(
             )));
         }
 
-        for (elixir_input, onnx_input) in zip(inputs, session_inputs) {
-            let derefed_input: &OrtexTensor = &elixir_input;
+        for (index, (elixir_input, onnx_input)) in zip(inputs.iter(), session_inputs).enumerate() {
             if is_bool_input(onnx_input.dtype()) {
-                // this assumes that the boolean input isn't huge -- we're cloning it twice;
-                // once below, once in the try_into()
-                let boolified_input = derefed_input.clone().to_bool()?;
-                let v: SessionInputValue = (&boolified_input).try_into()?;
-                ortified_inputs.push(v);
-            } else {
-                let v: SessionInputValue = derefed_input.try_into()?;
-                ortified_inputs.push(v);
+                boolified[index] = Some(elixir_input.to_bool()?);
             }
         }
     }
 
-    let outputs = session.run(&ortified_inputs[..])?;
-    let mut collected_outputs = Vec::new();
+    for (index, elixir_input) in inputs.iter().enumerate() {
+        let value: SessionInputValue = match &boolified[index] {
+            Some(converted) => converted.try_into()?,
+            None => (&**elixir_input).try_into()?,
+        };
+        ortified_inputs.push(value);
+    }
+
+    let mut outputs = session.run(&ortified_inputs[..])?;
+
+    // Every output keeps the ORT-owned value instead of copying it into an ndarray:
+    // `to_binary` then points the BEAM binary straight at ORT's buffer. Holding it past
+    // the session borrow is safe because the value owns its memory (the class of bug
+    // rc.15 fixed - "tensors outliving the allocator that created them").
+    let mut collected_outputs = Vec::with_capacity(output_names.len());
 
     for output_name in output_names {
-        let val = outputs.get(&output_name).ok_or_else(|| {
+        let value = outputs.remove(&output_name).ok_or_else(|| {
             Error::new(format!(
                 "Expected {output_name} to be in the outputs, but didn't find it"
             ))
         })?;
 
-        // NOTE: try_into impl here will implicitly map bool outputs to u8 outputs
-        let ortextensor: OrtexTensor = val.try_into()?;
-        let shape = ortextensor.shape();
-        let (dtype, bits) = ortextensor.dtype();
+        if !matches!(value.dtype(), ValueType::Tensor { .. }) {
+            return Err(Error::new(format!(
+                "Output {output_name} is not a tensor, got {}",
+                value.dtype()
+            )));
+        }
 
-        collected_outputs.push((ResourceArc::new(ortextensor), shape, dtype, bits))
+        let ortex_tensor = OrtexTensor::ort(value);
+        let shape = ortex_tensor.shape();
+        let (dtype, bits) = ortex_tensor.dtype();
+
+        collected_outputs.push((ResourceArc::new(ortex_tensor), shape, dtype, bits))
     }
 
     Ok(collected_outputs)

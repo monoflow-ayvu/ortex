@@ -83,6 +83,26 @@ defmodule Ortex.TestModel do
     end
   end
 
+  # Outputs arrive as ORT-owned values (P6). Any array operation has to materialize them
+  # first, and must still produce exactly the same numbers as a transferred tensor.
+  test "a run output can be reshaped, sliced and concatenated", %{model: model} do
+    {o1, _, _} = Ortex.run(model, inputs(1))
+    reference = Nx.backend_transfer(o1)
+
+    reshaped = Nx.reshape(o1, {2, 5})
+    assert Nx.shape(reshaped) == {2, 5}
+    assert Nx.to_flat_list(reshaped) == Nx.to_flat_list(reference)
+
+    sliced = Nx.slice(o1, [0, 3], [1, 4])
+    assert Nx.to_flat_list(sliced) == Nx.to_flat_list(Nx.slice(reference, [0, 3], [1, 4]))
+
+    concatenated = Nx.concatenate([o1, o1], axis: 0)
+    assert Nx.shape(concatenated) == {2, 10}
+
+    assert Nx.to_flat_list(concatenated) ==
+             Nx.to_flat_list(reference) ++ Nx.to_flat_list(reference)
+  end
+
   test "an optimization level of 0 still produces a usable session", %{model: model} do
     unoptimized = Ortex.load("./models/tinymodel.onnx", [:cpu], 0)
 
