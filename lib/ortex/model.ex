@@ -7,15 +7,16 @@ defmodule Ortex.Model do
 
   ```
   #Ortex.Model<
-  inputs: [{"x", "Int32", [nil, 100]}, {"y", "Float32", [nil, 100]}]
+  inputs: [{"x", "i32", [nil, 100]}, {"y", "f32", [nil, 100]}]
   outputs: [
-    {"9", "Float32", [nil, 10]},
-    {"onnx::Add_7", "Float32", [nil, 10]},
-    {"onnx::Add_8", "Float32", [nil, 10]}
+    {"9", "f32", [nil, 10]},
+    {"onnx::Add_7", "f32", [nil, 10]},
+    {"onnx::Add_8", "f32", [nil, 10]}
   ]>
   ```
 
-  `nil` values represent dynamic dimensions
+  Types are the elementary ONNX Runtime type names (`i32`, `f32`, `bf16`, ...) and `nil`
+  values represent dynamic dimensions.
   """
 
   @enforce_keys [:reference]

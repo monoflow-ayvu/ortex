@@ -32,7 +32,7 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = [
     "api-24",
 ] }
 ndarray = "0.17.2"
-half = "2.2.1"
+half = "2.7"
 # ort reports EP registration, device selection and per-node placement through
 # `tracing`; with no subscriber installed all of it is dropped. Turned on per
 # session by trace_path / ORTEX_TRACE, see model::init_tracing.

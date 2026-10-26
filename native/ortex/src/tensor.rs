@@ -240,11 +240,20 @@ fn get_bytes<'a, T>(array: &'a ArrayBase<T, IxDyn>) -> &'a [u8]
 where
     T: Data,
 {
-    let len = array.len();
-    let binding = unsafe { std::mem::zeroed() };
-    let f = array.get(0).unwrap_or(&binding);
-    let size: usize = std::mem::size_of_val(f);
-    unsafe { std::slice::from_raw_parts(array.as_ptr() as *const u8, len * size) }
+    // `to_binary` hands this to the BEAM as one flat byte range, which is only the
+    // contents of the tensor under a standard (C-order, no offset) layout. Every array
+    // reaching here today is built by `to_owned`/`from_shape_vec`, but a shared/offset
+    // buffer would otherwise serialize silently wrong bytes.
+    debug_assert!(
+        array.is_standard_layout(),
+        "get_bytes requires a standard layout; use as_standard_layout() first"
+    );
+
+    let Some(first) = array.iter().next() else {
+        return &[];
+    };
+    let element_size = std::mem::size_of_val(first);
+    unsafe { std::slice::from_raw_parts(array.as_ptr() as *const u8, array.len() * element_size) }
 }
 
 impl TryFrom<&Value> for OrtexTensor {
@@ -360,10 +369,11 @@ macro_rules! concatenate {
 
         let joined =
             ndarray::concatenate(Axis($axis), &views).map_err(|e| Error::new(e.to_string()))?;
-        // data is not contiguous after the concatenation above. To decode
-        // properly, need to create a new contiguous vector
-        let contiguous = Array::from_shape_vec(joined.raw_dim(), joined.iter().cloned().collect())
-            .map_err(|e| Error::new(e.to_string()))?;
+        // data is not contiguous after the concatenation above. To decode properly, need to
+        // create a new contiguous vector: as_standard_layout does it in one pass with the
+        // exact capacity, where iter().cloned().collect() could reallocate mid-way and
+        // from_shape_vec then reshaped a second buffer.
+        let contiguous = joined.as_standard_layout().into_owned();
         Ok(OrtexTensor::$ort_tensor_kind(contiguous))
     }};
 }
