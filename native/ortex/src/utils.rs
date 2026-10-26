@@ -96,16 +96,22 @@ pub fn to_binary<'a>(
     bits: usize,
     limit: usize,
 ) -> NifResult<Binary<'a>> {
+    // The binary points at the tensor's own memory (enif_make_resource_binary): no copy is
+    // made here. For an output straight from ONNX Runtime that memory is ORT's buffer, so
+    // a full output costs one copy in the whole run instead of two.
+    let bytes = reference.to_bytes().map_err(|e| nif_error(e))?;
+
     // `Ortex.Backend.backend_transfer/3` asks for the whole tensor with a limit of 0.
     if limit == 0 {
-        return Ok(reference.make_binary(env, |x| x.to_bytes()));
+        return Ok(reference.make_binary(env, |_| bytes));
     }
 
     let byte_limit = limit.saturating_mul(bits / 8);
-    Ok(reference.make_binary(env, |x| {
-        let bytes = x.to_bytes();
-        &bytes[..byte_limit.min(bytes.len())]
-    }))
+    Ok(reference.make_binary(env, |_| &bytes[..byte_limit.min(bytes.len())]))
+}
+
+fn nif_error<E: std::fmt::Display>(e: E) -> rustler::Error {
+    rustler::Error::Term(Box::new(e.to_string()))
 }
 
 fn provider_name(env: Env, ep: &Atom) -> String {

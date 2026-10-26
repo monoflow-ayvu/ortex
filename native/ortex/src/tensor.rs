@@ -3,7 +3,7 @@ use core::convert::TryFrom;
 use ndarray::prelude::*;
 use ndarray::{ArcArray, IxDyn, IxDynImpl, ViewRepr};
 use ort::session::SessionInputValue;
-use ort::value::{Tensor, TensorElementType, TensorRef, Value, ValueType};
+use ort::value::{TensorElementType, TensorRef, Value, ValueType};
 use ort::Error;
 use rustler::{Atom, Resource, ResourceArc};
 
@@ -41,10 +41,25 @@ pub enum OrtexTensor {
     f64(ArcArray<f64, IxDyn>),
     // bool is for internal use only: Nx sees these as u8
     bool(ArcArray<bool, IxDyn>),
+    /// A tensor still owned by ONNX Runtime, as `Ortex.run/2` returns it.
+    ///
+    /// The value owns the ORT buffer (and, since rc.15, outlives the allocator that made
+    /// it), so `to_bytes` can point the BEAM binary straight at that memory - one copy
+    /// per output instead of "ORT -> ndarray -> BEAM". Operations that need an ndarray
+    /// (reshape, slice, concatenate) materialize first and pay the copy then; `to_binary`
+    /// is the common path, and it no longer does.
+    ort(Value),
 }
 
 #[rustler::resource_impl(name = "OrtexTensor")]
 impl Resource for OrtexTensor {}
+
+// `ort::Value` holds raw pointers and so is not unwind-safe; rustler's blanket
+// `NifReturnable` impl requires it to encode the resource term. Encoding only touches the
+// resource handle, never the ORT value behind it - the same reasoning already applied to
+// OrtexModel.
+impl std::panic::RefUnwindSafe for OrtexTensor {}
+impl std::panic::UnwindSafe for OrtexTensor {}
 
 impl OrtexTensor {
     pub fn shape(&self) -> Vec<usize> {
@@ -62,31 +77,42 @@ impl OrtexTensor {
             OrtexTensor::f32(y) => y.shape().to_owned(),
             OrtexTensor::f64(y) => y.shape().to_owned(),
             OrtexTensor::bool(y) => y.shape().to_owned(),
+            OrtexTensor::ort(value) => value_shape(value),
         }
     }
 
     /// Rewrites the shape without touching the data.
     ///
     /// `into_shape_with_order` is a metadata-only operation when the array is standard
-    /// layout, and `clone` on an `ArcArray` only bumps the refcount - so a reshape of a
-    /// 600 KB output is a couple of pointer writes rather than a memcpy.
+    /// layout, and sharing is a refcount - so a reshape of a 600 KB output is a couple of
+    /// pointer writes rather than a memcpy. An ORT-owned value has no ndarray to share,
+    /// so it is materialized first.
     pub fn reshape(&self, shape: Vec<usize>) -> rustler::NifResult<Self> {
         let shape: IxDyn = IxDyn(&shape);
-        match self {
-            OrtexTensor::s8(y) => Ok(OrtexTensor::s8(reshape_arc(y, shape)?)),
-            OrtexTensor::s16(y) => Ok(OrtexTensor::s16(reshape_arc(y, shape)?)),
-            OrtexTensor::s32(y) => Ok(OrtexTensor::s32(reshape_arc(y, shape)?)),
-            OrtexTensor::s64(y) => Ok(OrtexTensor::s64(reshape_arc(y, shape)?)),
-            OrtexTensor::u8(y) => Ok(OrtexTensor::u8(reshape_arc(y, shape)?)),
-            OrtexTensor::u16(y) => Ok(OrtexTensor::u16(reshape_arc(y, shape)?)),
-            OrtexTensor::u32(y) => Ok(OrtexTensor::u32(reshape_arc(y, shape)?)),
-            OrtexTensor::u64(y) => Ok(OrtexTensor::u64(reshape_arc(y, shape)?)),
-            OrtexTensor::f16(y) => Ok(OrtexTensor::f16(reshape_arc(y, shape)?)),
-            OrtexTensor::bf16(y) => Ok(OrtexTensor::bf16(reshape_arc(y, shape)?)),
-            OrtexTensor::f32(y) => Ok(OrtexTensor::f32(reshape_arc(y, shape)?)),
-            OrtexTensor::f64(y) => Ok(OrtexTensor::f64(reshape_arc(y, shape)?)),
-            OrtexTensor::bool(y) => Ok(OrtexTensor::bool(reshape_arc(y, shape)?)),
-        }
+        let tensor = self.into_shared().map_err(nif_term)?;
+
+        Ok(match tensor {
+            OrtexTensor::s8(y) => OrtexTensor::s8(reshape_arc(&y, shape)?),
+            OrtexTensor::s16(y) => OrtexTensor::s16(reshape_arc(&y, shape)?),
+            OrtexTensor::s32(y) => OrtexTensor::s32(reshape_arc(&y, shape)?),
+            OrtexTensor::s64(y) => OrtexTensor::s64(reshape_arc(&y, shape)?),
+            OrtexTensor::u8(y) => OrtexTensor::u8(reshape_arc(&y, shape)?),
+            OrtexTensor::u16(y) => OrtexTensor::u16(reshape_arc(&y, shape)?),
+            OrtexTensor::u32(y) => OrtexTensor::u32(reshape_arc(&y, shape)?),
+            OrtexTensor::u64(y) => OrtexTensor::u64(reshape_arc(&y, shape)?),
+            OrtexTensor::f16(y) => OrtexTensor::f16(reshape_arc(&y, shape)?),
+            OrtexTensor::bf16(y) => OrtexTensor::bf16(reshape_arc(&y, shape)?),
+            OrtexTensor::f32(y) => OrtexTensor::f32(reshape_arc(&y, shape)?),
+            OrtexTensor::f64(y) => OrtexTensor::f64(reshape_arc(&y, shape)?),
+            OrtexTensor::bool(y) => OrtexTensor::bool(reshape_arc(&y, shape)?),
+            // `into_shared` materializes this variant, so it cannot come back here.
+            OrtexTensor::ort(value) => {
+                return Err(rustler::Error::Term(Box::new(format!(
+                    "could not materialize output tensor: {}",
+                    value.dtype()
+                ))))
+            }
+        })
     }
 
     pub fn dtype(&self) -> (Atom, usize) {
@@ -104,11 +130,12 @@ impl OrtexTensor {
             OrtexTensor::f32(_) => (ortex_atoms::f(), 32),
             OrtexTensor::f64(_) => (ortex_atoms::f(), 64),
             OrtexTensor::bool(_) => (ortex_atoms::u(), 8),
+            OrtexTensor::ort(value) => value_dtype(value),
         }
     }
 
-    pub fn to_bytes<'a>(&'a self) -> &'a [u8] {
-        let contents: &'a [u8] = match self {
+    pub fn to_bytes(&self) -> Result<&[u8], Error> {
+        let contents: &[u8] = match self {
             OrtexTensor::s8(y) => get_bytes(y),
             OrtexTensor::s16(y) => get_bytes(y),
             OrtexTensor::s32(y) => get_bytes(y),
@@ -122,12 +149,13 @@ impl OrtexTensor {
             OrtexTensor::f32(y) => get_bytes(y),
             OrtexTensor::f64(y) => get_bytes(y),
             OrtexTensor::bool(y) => get_bytes(y),
+            OrtexTensor::ort(value) => value_bytes(value)?,
         };
-        contents
+        Ok(contents)
     }
 
-    pub fn slice<'a>(
-        &'a self,
+    pub fn slice(
+        &self,
         start_indicies: Vec<isize>,
         lengths: Vec<isize>,
         strides: Vec<isize>,
@@ -157,24 +185,36 @@ impl OrtexTensor {
         }
         // A strided slice is not a contiguous window of the buffer, so the result is
         // materialized: standard layout is part of this type's contract (`to_bytes`).
-        Ok(match self {
-            OrtexTensor::s8(y) => OrtexTensor::s8(slice_arc(y, &slice_specs)),
-            OrtexTensor::s16(y) => OrtexTensor::s16(slice_arc(y, &slice_specs)),
-            OrtexTensor::s32(y) => OrtexTensor::s32(slice_arc(y, &slice_specs)),
-            OrtexTensor::s64(y) => OrtexTensor::s64(slice_arc(y, &slice_specs)),
-            OrtexTensor::u8(y) => OrtexTensor::u8(slice_arc(y, &slice_specs)),
-            OrtexTensor::u16(y) => OrtexTensor::u16(slice_arc(y, &slice_specs)),
-            OrtexTensor::u32(y) => OrtexTensor::u32(slice_arc(y, &slice_specs)),
-            OrtexTensor::u64(y) => OrtexTensor::u64(slice_arc(y, &slice_specs)),
-            OrtexTensor::f16(y) => OrtexTensor::f16(slice_arc(y, &slice_specs)),
-            OrtexTensor::bf16(y) => OrtexTensor::bf16(slice_arc(y, &slice_specs)),
-            OrtexTensor::f32(y) => OrtexTensor::f32(slice_arc(y, &slice_specs)),
-            OrtexTensor::f64(y) => OrtexTensor::f64(slice_arc(y, &slice_specs)),
-            OrtexTensor::bool(y) => OrtexTensor::bool(slice_arc(y, &slice_specs)),
+        let tensor = self.into_shared().map_err(nif_term)?;
+
+        Ok(match tensor {
+            OrtexTensor::s8(y) => OrtexTensor::s8(slice_arc(&y, &slice_specs)),
+            OrtexTensor::s16(y) => OrtexTensor::s16(slice_arc(&y, &slice_specs)),
+            OrtexTensor::s32(y) => OrtexTensor::s32(slice_arc(&y, &slice_specs)),
+            OrtexTensor::s64(y) => OrtexTensor::s64(slice_arc(&y, &slice_specs)),
+            OrtexTensor::u8(y) => OrtexTensor::u8(slice_arc(&y, &slice_specs)),
+            OrtexTensor::u16(y) => OrtexTensor::u16(slice_arc(&y, &slice_specs)),
+            OrtexTensor::u32(y) => OrtexTensor::u32(slice_arc(&y, &slice_specs)),
+            OrtexTensor::u64(y) => OrtexTensor::u64(slice_arc(&y, &slice_specs)),
+            OrtexTensor::f16(y) => OrtexTensor::f16(slice_arc(&y, &slice_specs)),
+            OrtexTensor::bf16(y) => OrtexTensor::bf16(slice_arc(&y, &slice_specs)),
+            OrtexTensor::f32(y) => OrtexTensor::f32(slice_arc(&y, &slice_specs)),
+            OrtexTensor::f64(y) => OrtexTensor::f64(slice_arc(&y, &slice_specs)),
+            OrtexTensor::bool(y) => OrtexTensor::bool(slice_arc(&y, &slice_specs)),
+            OrtexTensor::ort(value) => {
+                return Err(rustler::Error::Term(Box::new(format!(
+                    "could not materialize output tensor: {}",
+                    value.dtype()
+                ))))
+            }
         })
     }
 
-    pub fn to_bool(self) -> Result<OrtexTensor, Error> {
+    /// Rewrites a 0/1 u8 tensor as a bool tensor, for models that declare boolean inputs.
+    ///
+    /// Borrowed rather than consuming: callers keep the input they were given, and the new
+    /// buffer has to be written element by element anyway.
+    pub fn to_bool(&self) -> Result<OrtexTensor, Error> {
         match self {
             OrtexTensor::u8(y) => {
                 if y.iter().any(|x| *x > 1) {
@@ -184,12 +224,110 @@ impl OrtexTensor {
                 }
                 Ok(OrtexTensor::bool(y.mapv(|x| x == 1).into_shared()))
             }
+            // A model output feeding a bool input: materialize, then rewrite.
+            OrtexTensor::ort(value) => OrtexTensor::try_from(value)?.to_bool(),
             t => Err(Error::new(format!(
                 "Can't convert this type {:?} to bool",
                 t.dtype()
             ))),
         }
     }
+
+    /// An owned handle to this tensor's data.
+    ///
+    /// Array variants share their buffer (refcount); an ORT-owned output has no ndarray to
+    /// share, so it is copied out once - the price of an array operation on a fresh
+    /// output.
+    fn into_shared(&self) -> Result<OrtexTensor, Error> {
+        Ok(match self {
+            OrtexTensor::s8(y) => OrtexTensor::s8(y.clone()),
+            OrtexTensor::s16(y) => OrtexTensor::s16(y.clone()),
+            OrtexTensor::s32(y) => OrtexTensor::s32(y.clone()),
+            OrtexTensor::s64(y) => OrtexTensor::s64(y.clone()),
+            OrtexTensor::u8(y) => OrtexTensor::u8(y.clone()),
+            OrtexTensor::u16(y) => OrtexTensor::u16(y.clone()),
+            OrtexTensor::u32(y) => OrtexTensor::u32(y.clone()),
+            OrtexTensor::u64(y) => OrtexTensor::u64(y.clone()),
+            OrtexTensor::f16(y) => OrtexTensor::f16(y.clone()),
+            OrtexTensor::bf16(y) => OrtexTensor::bf16(y.clone()),
+            OrtexTensor::f32(y) => OrtexTensor::f32(y.clone()),
+            OrtexTensor::f64(y) => OrtexTensor::f64(y.clone()),
+            OrtexTensor::bool(y) => OrtexTensor::bool(y.clone()),
+            OrtexTensor::ort(value) => OrtexTensor::try_from(value)?,
+        })
+    }
+}
+
+/// Nx-visible shape of an ORT-owned value.
+fn value_shape(value: &Value) -> Vec<usize> {
+    match value.dtype() {
+        // A materialized value always has concrete dimensions; the clamp only protects the
+        // metadata path if a symbolic dimension ever reaches here.
+        ValueType::Tensor { shape, .. } => shape.iter().map(|d| (*d).max(0) as usize).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Nx-visible dtype of an ORT-owned value.
+fn value_dtype(value: &Value) -> (Atom, usize) {
+    match value.dtype() {
+        ValueType::Tensor { ty, .. } => match ty {
+            TensorElementType::Bfloat16 => (ortex_atoms::bf(), 16),
+            TensorElementType::Float16 => (ortex_atoms::f(), 16),
+            TensorElementType::Float32 => (ortex_atoms::f(), 32),
+            TensorElementType::Float64 => (ortex_atoms::f(), 64),
+            TensorElementType::Uint8 | TensorElementType::Bool => (ortex_atoms::u(), 8),
+            TensorElementType::Uint16 => (ortex_atoms::u(), 16),
+            TensorElementType::Uint32 => (ortex_atoms::u(), 32),
+            TensorElementType::Uint64 => (ortex_atoms::u(), 64),
+            TensorElementType::Int8 => (ortex_atoms::s(), 8),
+            TensorElementType::Int16 => (ortex_atoms::s(), 16),
+            TensorElementType::Int32 => (ortex_atoms::s(), 32),
+            TensorElementType::Int64 => (ortex_atoms::s(), 64),
+            _ => (ortex_atoms::u(), 8),
+        },
+        _ => (ortex_atoms::u(), 8),
+    }
+}
+
+/// The value's bytes, read straight out of ONNX Runtime's buffer.
+fn value_bytes(value: &Value) -> Result<&[u8], Error> {
+    let ValueType::Tensor { ty, .. } = value.dtype() else {
+        return Err(Error::new(format!(
+            "Can't read bytes from non tensor, got {}",
+            value.dtype()
+        )));
+    };
+
+    macro_rules! bytes {
+        ($typ:ty) => {{
+            let (_, data) = value.try_extract_tensor::<$typ>()?;
+            unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+            }
+        }};
+    }
+
+    Ok(match ty {
+        TensorElementType::Bfloat16 => bytes!(half::bf16),
+        TensorElementType::Float16 => bytes!(half::f16),
+        TensorElementType::Float32 => bytes!(f32),
+        TensorElementType::Float64 => bytes!(f64),
+        TensorElementType::Uint8 => bytes!(u8),
+        TensorElementType::Uint16 => bytes!(u16),
+        TensorElementType::Uint32 => bytes!(u32),
+        TensorElementType::Uint64 => bytes!(u64),
+        TensorElementType::Int8 => bytes!(i8),
+        TensorElementType::Int16 => bytes!(i16),
+        TensorElementType::Int32 => bytes!(i32),
+        TensorElementType::Int64 => bytes!(i64),
+        TensorElementType::Bool => bytes!(bool),
+        other => return Err(Error::new(format!("Unsupported tensor type {:?}", other))),
+    })
+}
+
+fn nif_term<E: std::fmt::Display>(e: E) -> rustler::Error {
+    rustler::Error::Term(Box::new(e.to_string()))
 }
 
 fn reshape_arc<T: Clone>(
@@ -287,7 +425,7 @@ impl TryFrom<&Value> for OrtexTensor {
     }
 }
 
-impl TryFrom<&OrtexTensor> for SessionInputValue<'_> {
+impl<'a> TryFrom<&'a OrtexTensor> for SessionInputValue<'a> {
     type Error = Error;
 
     /// Borrows the tensor's buffer into an ORT value instead of copying it.
@@ -296,7 +434,7 @@ impl TryFrom<&OrtexTensor> for SessionInputValue<'_> {
     /// buffer alive for as long as the ORT value exists, and ORT reads the data in place
     /// during `run`, so handing over a clone of the `ArcArray` costs one refcount bump -
     /// not the second full copy per input this used to do.
-    fn try_from(ort_tensor: &OrtexTensor) -> Result<Self, Self::Error> {
+    fn try_from(ort_tensor: &'a OrtexTensor) -> Result<Self, Self::Error> {
         let r: SessionInputValue = match ort_tensor {
             OrtexTensor::s8(arr) => TensorRef::from_array_view(arr.clone())?.into(),
             OrtexTensor::s16(arr) => TensorRef::from_array_view(arr.clone())?.into(),
@@ -310,34 +448,12 @@ impl TryFrom<&OrtexTensor> for SessionInputValue<'_> {
             OrtexTensor::u16(arr) => TensorRef::from_array_view(arr.clone())?.into(),
             OrtexTensor::u32(arr) => TensorRef::from_array_view(arr.clone())?.into(),
             OrtexTensor::u64(arr) => TensorRef::from_array_view(arr.clone())?.into(),
-            // `bool` does not implement `PrimitiveTensorElementType`, so it cannot be
-            // borrowed; it is also only ever produced from a u8 tensor inside `run`.
-            OrtexTensor::bool(arr) => {
-                Tensor::from_array(arr.as_standard_layout().into_owned())?.into()
-            }
+            OrtexTensor::bool(arr) => TensorRef::from_array_view(arr.clone())?.into(),
+            // A run output fed back in as an input: its Value already owns the ORT buffer,
+            // so it can be passed as-is - no copy, no materialization.
+            OrtexTensor::ort(value) => SessionInputValue::from(value),
         };
         Ok(r)
-    }
-}
-
-impl Clone for OrtexTensor {
-    /// Refcount bump on the shared buffer, not a copy of it.
-    fn clone(&self) -> Self {
-        match self {
-            OrtexTensor::s8(t) => OrtexTensor::s8(t.clone()),
-            OrtexTensor::s16(t) => OrtexTensor::s16(t.clone()),
-            OrtexTensor::s32(t) => OrtexTensor::s32(t.clone()),
-            OrtexTensor::s64(t) => OrtexTensor::s64(t.clone()),
-            OrtexTensor::bf16(t) => OrtexTensor::bf16(t.clone()),
-            OrtexTensor::f16(t) => OrtexTensor::f16(t.clone()),
-            OrtexTensor::f32(t) => OrtexTensor::f32(t.clone()),
-            OrtexTensor::f64(t) => OrtexTensor::f64(t.clone()),
-            OrtexTensor::u8(t) => OrtexTensor::u8(t.clone()),
-            OrtexTensor::u16(t) => OrtexTensor::u16(t.clone()),
-            OrtexTensor::u32(t) => OrtexTensor::u32(t.clone()),
-            OrtexTensor::u64(t) => OrtexTensor::u64(t.clone()),
-            OrtexTensor::bool(t) => OrtexTensor::bool(t.clone()),
-        }
     }
 }
 
@@ -385,6 +501,16 @@ pub fn concatenate(
     dtype: (&str, usize),
     axis: usize,
 ) -> Result<OrtexTensor, Error> {
+    // An ORT-owned output has no ndarray for the macro below to view; materialize it once
+    // for this concatenation. Array variants are shared, not copied.
+    let tensors: Vec<ResourceArc<OrtexTensor>> = tensors
+        .iter()
+        .map(|tensor| match &**tensor {
+            OrtexTensor::ort(value) => Ok(ResourceArc::new(OrtexTensor::try_from(value)?)),
+            _ => Ok(tensor.clone()),
+        })
+        .collect::<Result<_, Error>>()?;
+
     match dtype {
         ("s", 8) => concatenate!(tensors, axis, i8, s8),
         ("s", 16) => concatenate!(tensors, axis, i16, s16),
