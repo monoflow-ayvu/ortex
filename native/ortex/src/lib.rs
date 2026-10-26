@@ -35,10 +35,15 @@ fn init(
 
 #[rustler::nif]
 fn show_session(model: ResourceArc<model::OrtexModel>) -> NifResult<(IoSpec, IoSpec)> {
-    Ok(model::show(model))
+    Ok(model::show(&model))
 }
 
-#[rustler::nif(schedule = "DirtyIo")]
+/// Inference is CPU/NPU-bound: it holds a dirty scheduler for the whole run, so it belongs
+/// on the dirty CPU pool, which scales with the machine. DirtyIo is a fixed pool of 10
+/// threads regardless of core count (an artificial ceiling on concurrent inference) and is
+/// shared with real I/O - file and serial port work that a hung NPU run would starve.
+/// `init` stays DirtyIo: loading a model really does read a file.
+#[rustler::nif(schedule = "DirtyCpu")]
 fn run(
     model: ResourceArc<model::OrtexModel>,
     inputs: Vec<ResourceArc<OrtexTensor>>,

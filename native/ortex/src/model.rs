@@ -18,6 +18,10 @@ use rustler::{Atom, Resource, ResourceArc};
 /// are threadsafe so this can be called concurrently from the beam.
 pub struct OrtexModel {
     pub session: Mutex<Session>,
+    /// Input/output specs, captured once at load time. They are immutable for the
+    /// lifetime of the session, so describing a model never has to take the session
+    /// lock - which is held for the whole duration of `run`.
+    pub io_spec: (IoSpec, IoSpec),
 }
 
 #[rustler::resource_impl(name = "OrtexModel")]
@@ -27,7 +31,11 @@ impl std::panic::RefUnwindSafe for OrtexModel {}
 impl std::panic::UnwindSafe for OrtexModel {}
 
 /// `(Name, Type, Dimension)` triples describing a session's inputs or outputs.
-pub type IoSpec = Vec<(String, String, Option<Vec<i64>>)>;
+///
+/// `Type` is the elementary tensor type (`"f32"`, `"i64"`, ...). Dimensions are `None`
+/// for non-tensor outlets and per-axis `nil` for a dynamic axis: onnxruntime reports a
+/// dynamic dimension as `-1`, which would be indistinguishable from a broken shape.
+pub type IoSpec = Vec<(String, String, Option<Vec<Option<i64>>>)>;
 
 /// Keys in `qnn_opts` that configure ortex itself rather than the QNN EP, and
 /// so must not be forwarded to onnxruntime as provider options.
@@ -234,14 +242,54 @@ pub fn init(
     //
     //   intra_threads=1      run the node on the calling thread; no pool, no spin
     //   intra_op_spinning=0  keep the pool but park immediately instead of spinning
-    for (key, value) in &qnn_opts {
-        builder = match key.as_str() {
-            "intra_threads" => builder.with_intra_threads(parse_usize(key, value)?)?,
-            "inter_threads" => builder.with_inter_threads(parse_usize(key, value)?)?,
-            "intra_op_spinning" => builder.with_intra_op_spinning(parse_bool(key, value)?)?,
-            "inter_op_spinning" => builder.with_inter_op_spinning(parse_bool(key, value)?)?,
-            _ => builder
-        };
+    let mut intra_threads = lookup(&qnn_opts, "intra_threads")
+        .map(|value| parse_usize("intra_threads", &value))
+        .transpose()?;
+    let inter_threads = lookup(&qnn_opts, "inter_threads")
+        .map(|value| parse_usize("inter_threads", &value))
+        .transpose()?;
+    let mut intra_op_spinning = lookup(&qnn_opts, "intra_op_spinning")
+        .map(|value| parse_bool("intra_op_spinning", &value))
+        .transpose()?;
+    let inter_op_spinning = lookup(&qnn_opts, "inter_op_spinning")
+        .map(|value| parse_bool("inter_op_spinning", &value))
+        .transpose()?;
+
+    // An accelerator EP whose graph is one offloaded node has no CPU work for an intra-op
+    // pool to do, so the spinning default is pure heat: the ~24 -> 20.6 fps throttle above.
+    // Apply the measured-good defaults only when the caller did not pick a value, and say
+    // so once - a silent change to a performance knob is the kind of thing that costs a
+    // day to chase later.
+    if use_qnn {
+        let mut applied: Vec<&str> = Vec::new();
+        if intra_threads.is_none() {
+            intra_threads = Some(1);
+            applied.push("intra_threads=1");
+        }
+        if intra_op_spinning.is_none() {
+            intra_op_spinning = Some(false);
+            applied.push("intra_op_spinning=0");
+        }
+        if !applied.is_empty() {
+            eprintln!(
+                "ortex: accelerator (QNN) EP active, defaulting {}; override with the \
+                 same keys in qnn_opts",
+                applied.join(" ")
+            );
+        }
+    }
+
+    if let Some(value) = intra_threads {
+        builder = builder.with_intra_threads(value)?;
+    }
+    if let Some(value) = inter_threads {
+        builder = builder.with_inter_threads(value)?;
+    }
+    if let Some(value) = intra_op_spinning {
+        builder = builder.with_intra_op_spinning(value)?;
+    }
+    if let Some(value) = inter_op_spinning {
+        builder = builder.with_inter_op_spinning(value)?;
     }
 
     let mut builder = if use_qnn {
@@ -250,33 +298,44 @@ pub fn init(
         builder
     };
 
+    let session = builder.commit_from_file(model_path)?;
+    let io_spec = (describe(session.inputs()), describe(session.outputs()));
+
     Ok(OrtexModel {
-        session: Mutex::new(builder.commit_from_file(model_path)?),
+        session: Mutex::new(session),
+        io_spec,
     })
 }
 
 /// Returns input/output information about a model. The result is a Tuple of
-/// `inputs` and `outputs` with elements of `(Name, Type, Dimension)` where
-/// `Dimension` elements of -1 are dynamic.
-pub fn show(model: ResourceArc<OrtexModel>) -> (IoSpec, IoSpec) {
-    let session = model.session.lock().unwrap_or_else(|e| e.into_inner());
-
-    (describe(session.inputs()), describe(session.outputs()))
+/// `inputs` and `outputs` with elements of `(Name, Type, Dimension)` where a `nil`
+/// dimension is dynamic.
+///
+/// This reads the spec cached at load time and takes no locks, so inspecting a model
+/// never queues behind a running inference.
+pub fn show(model: &OrtexModel) -> (IoSpec, IoSpec) {
+    model.io_spec.clone()
 }
 
 fn describe(outlets: &[Outlet]) -> IoSpec {
     outlets
         .iter()
         .map(|outlet| {
-            let dims = match outlet.dtype() {
-                ValueType::Tensor { shape, .. } => Some(shape.to_vec()),
-                _ => None,
+            let (ty, dims) = match outlet.dtype() {
+                ValueType::Tensor { ty, shape, .. } => (
+                    ty.to_string(),
+                    // onnxruntime reports a dynamic axis as -1; the BEAM side documents
+                    // nil for it, and -1 also reads as "broken shape".
+                    Some(
+                        shape
+                            .iter()
+                            .map(|dim| (*dim >= 0).then_some(*dim))
+                            .collect::<Vec<_>>(),
+                    ),
+                ),
+                other => (format!("{other:?}"), None),
             };
-            (
-                outlet.name().to_string(),
-                format!("{:#?}", outlet.dtype()),
-                dims,
-            )
+            (outlet.name().to_string(), ty, dims)
         })
         .collect()
 }
