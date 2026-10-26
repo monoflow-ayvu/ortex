@@ -116,6 +116,28 @@ instead of quietly running the model on the CPU.
 QNN is the exception. It is registered at session creation rather than compiled in, so it
 needs no feature flag. See `Ortex.load/4` for its options.
 
+## Diagnostics
+
+`trace_path:` in `Ortex.load/4` (or the `ORTEX_TRACE` environment variable) writes an
+ONNX Runtime trace to a file: EP registration, device selection and per-node placement.
+That last one is how you check whether an accelerator actually claimed the graph; the
+NIF's stdout goes to the Nerves console, not to the caller, so a file is the only way to
+read it. `RUST_LOG` selects the `tracing` filter, and onnxruntime's own log level is
+raised to VERBOSE at the same time.
+
+It is compiled in through the `trace` cargo feature, off by default: a subscriber drags
+in `tracing-subscriber` with `env-filter`, which pulls roughly ten extra crates
+(`regex-automata`, `aho-corasick`, `sharded-slab`, ...) into the NIF - weight with no
+purpose in a production embedded artifact. Enable it when you need it:
+
+```sh
+ORTEX_FEATURES=trace mix compile
+```
+
+Without the feature, `trace_path` and `ORTEX_TRACE` are a no-op and say so once on stderr
+rather than writing an empty file.
+
+
 ## Packaging and Offline Builds
 
 On `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu` (including Nerves targets),

@@ -19,7 +19,8 @@ defmodule Ortex do
   `qnn_opts` configures the QNN execution provider. `backend_path` and `provider_path` pick
   the QNN libraries and any other key is forwarded as a QNN provider option (`htp_arch: 68`);
   those only apply when `:qnn` is among `eps`. `trace_path` and `"env.NAME"` keys take effect
-  regardless: the first writes an ORT trace, the second exports `NAME` into the OS
+  regardless: the first writes an ORT trace (it needs the `trace` cargo feature - see the
+  README - and is a no-op that says so without it), the second exports `NAME` into the OS
   environment, the only way QNN's own `getenv` calls can see it.
 
   `sessions: N` loads N copies of the same graph into the model. An ONNX Runtime session is

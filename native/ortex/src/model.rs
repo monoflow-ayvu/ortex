@@ -80,16 +80,20 @@ const RESERVED: &[&str] = &[
 ];
 
 fn parse_usize(key: &str, value: &str) -> Result<usize, Error> {
-    value
-        .parse()
-        .map_err(|_| Error::new(format!("{key} must be a non-negative integer, got {value:?}")))
+    value.parse().map_err(|_| {
+        Error::new(format!(
+            "{key} must be a non-negative integer, got {value:?}"
+        ))
+    })
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
     match value {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" => Ok(false),
-        other => Err(Error::new(format!("{key} must be a boolean, got {other:?}")))
+        other => Err(Error::new(format!(
+            "{key} must be a boolean, got {other:?}"
+        ))),
     }
 }
 
@@ -102,38 +106,71 @@ fn lookup(opts: &[(String, String)], key: &str) -> Option<String> {
 /// The file is swappable, the subscriber is not: `tracing` allows one global subscriber
 /// per process, so installing it around a fixed writer means the first session to run
 /// wins and every later `trace_path` is silently ignored.
+#[cfg(feature = "trace")]
 static TRACE_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
+#[cfg(feature = "trace")]
 struct TraceWriter;
 
+#[cfg(feature = "trace")]
 impl std::io::Write for TraceWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        match TRACE_FILE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
             Some(file) => file.write(buf),
             // The subscriber outlives any one trace request; with no file set there is
             // nowhere to put this.
-            None => Ok(buf.len())
+            None => Ok(buf.len()),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        match TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        match TRACE_FILE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
             Some(file) => file.flush(),
-            None => Ok(())
+            None => Ok(()),
         }
     }
 }
 
+/// Where `trace_path` / `ORTEX_TRACE` point, if either was set.
+fn trace_path(qnn_opts: &[(String, String)]) -> Option<String> {
+    lookup(qnn_opts, "trace_path").or_else(|| std::env::var("ORTEX_TRACE").ok())
+}
+
+/// True when diagnostics were asked for. This also decides whether onnxruntime's own log
+/// level is raised: the node-placement report - the one line that answers "did QNN claim
+/// this graph" - is only emitted at VERBOSE, and asking for a trace is asking for it.
+#[cfg(feature = "trace")]
 fn tracing_requested(qnn_opts: &[(String, String)]) -> bool {
-    lookup(qnn_opts, "trace_path").is_some() || std::env::var("ORTEX_TRACE").is_ok()
+    trace_path(qnn_opts).is_some()
+}
+
+/// Without the `trace` feature there is no subscriber to raise, but asking for a trace
+/// still has to be visible: a silently empty file is worse than no file.
+#[cfg(not(feature = "trace"))]
+fn tracing_requested(qnn_opts: &[(String, String)]) -> bool {
+    if let Some(path) = trace_path(qnn_opts) {
+        eprintln!(
+            "ortex: trace requested for {path}, but this NIF was built without the `trace` \
+             feature - nothing will be written. Rebuild with ORTEX_FEATURES=trace"
+        );
+    }
+    false
 }
 
 /// Points tracing at `trace_path` (or `$ORTEX_TRACE`). A NIF's stdout goes to the Nerves
 /// console rather than to the caller, so a file is the only way to read EP registration,
 /// device selection and per-node placement remotely. Filter with RUST_LOG.
+#[cfg(feature = "trace")]
 fn init_tracing(qnn_opts: &[(String, String)]) {
-    let Some(path) = lookup(qnn_opts, "trace_path").or_else(|| std::env::var("ORTEX_TRACE").ok())
-    else {
+    let Some(path) = trace_path(qnn_opts) else {
         return;
     };
 
@@ -162,6 +199,9 @@ fn init_tracing(qnn_opts: &[(String, String)]) {
         env.set_log_level(ort::logging::LogLevel::Verbose);
     }
 }
+
+#[cfg(not(feature = "trace"))]
+fn init_tracing(_qnn_opts: &[(String, String)]) {}
 
 /// QNN is a *plugin* EP on upstream ONNX Runtime builds: it has to be registered with
 /// the environment and then selected via the V2 device API, not appended by name (which
