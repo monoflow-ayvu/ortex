@@ -1,6 +1,11 @@
 defmodule Ortex.TestErrors do
   use ExUnit.Case
 
+  # Which EP is absent depends on how this NIF was built (ORTEX_FEATURES), so pick one
+  # that is definitely not compiled in rather than assuming the default feature set.
+  @compiled Application.compile_env(:ortex, Ortex.Native, []) |> Keyword.get(:features, [])
+  @absent_ep if :cuda in @compiled, do: :tensorrt, else: :cuda
+
   # The Rustler contract: a Rust-side failure crosses the NIF as {:error, term}, and this
   # backend raises it. Every test here exercises a path that used to be unreachable in
   # the suite (M4).
@@ -24,6 +29,16 @@ defmodule Ortex.TestErrors do
     assert_raise RuntimeError, ~r/intra_threads must be a non-negative integer/, fn ->
       Ortex.load("./models/tinymodel.onnx", [:cpu], 3, intra_threads: "abc")
     end
+  end
+
+  test "an execution provider that was not compiled in raises instead of running on CPU" do
+    error =
+      assert_raise RuntimeError, fn ->
+        Ortex.load("./models/tinymodel.onnx", [@absent_ep])
+      end
+
+    assert error.message =~ "not compiled into this NIF"
+    assert error.message =~ "`#{@absent_ep}`"
   end
 
   test "from_binary rejects a byte length that does not match the shape" do

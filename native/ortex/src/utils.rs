@@ -8,11 +8,7 @@ use ndarray::{Array, IxDyn};
 use rustler::types::Binary;
 use rustler::{Atom, Env, NifResult, ResourceArc};
 
-use ort::execution_providers::{
-    ACLExecutionProvider, CPUExecutionProvider, CUDAExecutionProvider, CoreMLExecutionProvider,
-    DirectMLExecutionProvider, ExecutionProviderDispatch, OneDNNExecutionProvider,
-    ROCmExecutionProvider, TensorRTExecutionProvider,
-};
+use ort::ep::{self, ExecutionProviderDispatch};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::value::{TensorElementType, ValueType};
 
@@ -126,27 +122,132 @@ pub fn wants_qnn(env: Env, eps: &[Atom]) -> bool {
     eps.iter().any(|e| provider_name(env, e) == QNN)
 }
 
-/// Takes a vec of Atoms and transforms them into a vec of ExecutionProvider Enums
+/// Takes a vec of Atoms and transforms them into a vec of ExecutionProvider Enums.
+///
+/// Since ort rc.13 the execution provider structs sit behind cargo features, so an EP
+/// that was not compiled in has no type at all. Returning an error naming the feature is
+/// what stops `Ortex.load(path, [:cuda])` from quietly running on the CPU instead.
 pub fn map_eps(env: Env, eps: Vec<Atom>) -> Result<Vec<ExecutionProviderDispatch>, String> {
     eps.iter()
         .map(|e| provider_name(env, e))
         .filter(|name| name != QNN)
         .map(|name| match name.as_str() {
-            CPU => Ok(CPUExecutionProvider::default().build()),
-            CUDA => Ok(CUDAExecutionProvider::default().build()),
-            TENSORRT => Ok(TensorRTExecutionProvider::default().build()),
-            ACL => Ok(ACLExecutionProvider::default().build()),
-            ONEDNN | DNNL => Ok(OneDNNExecutionProvider::default().build()),
-            COREML => Ok(CoreMLExecutionProvider::default().build()),
-            DIRECTML => Ok(DirectMLExecutionProvider::default().build()),
-            ROCM => Ok(ROCmExecutionProvider::default().build()),
-            _ => Err(format!(
+            CPU => Ok(ep::CPU::default().build()),
+            CUDA => cuda_ep(),
+            TENSORRT => tensorrt_ep(),
+            ACL => acl_ep(),
+            ONEDNN | DNNL => onednn_ep(),
+            COREML => coreml_ep(),
+            DIRECTML => directml_ep(),
+            ROCM => rocm_ep(),
+            other => Err(format!(
                 "Unknown execution provider: {}. Expected one of: {}",
-                name,
+                other,
                 [CPU, CUDA, TENSORRT, ACL, ONEDNN, DNNL, COREML, DIRECTML, ROCM, QNN].join(", ")
             )),
         })
         .collect()
+}
+
+fn ep_not_compiled(name: &str, feature: &str) -> String {
+    format!(
+        "{name} execution provider is not compiled into this NIF. Rebuild with the \
+         `{feature}` cargo feature: ORTEX_FEATURES={feature} mix compile (or \
+         `features: [\"{feature}\"]` for `config :ortex, Ortex.Native`)"
+    )
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_ep() -> Result<ExecutionProviderDispatch, String> {
+    Ok(ep::CUDA::default().build())
+}
+
+#[cfg(not(feature = "cuda"))]
+fn cuda_ep() -> Result<ExecutionProviderDispatch, String> {
+    Err(ep_not_compiled("CUDA", "cuda"))
+}
+
+#[cfg(feature = "tensorrt")]
+fn tensorrt_ep() -> Result<ExecutionProviderDispatch, String> {
+    Ok(ep::TensorRT::default().build())
+}
+
+#[cfg(not(feature = "tensorrt"))]
+fn tensorrt_ep() -> Result<ExecutionProviderDispatch, String> {
+    Err(ep_not_compiled("TensorRT", "tensorrt"))
+}
+
+#[cfg(feature = "acl")]
+fn acl_ep() -> Result<ExecutionProviderDispatch, String> {
+    Ok(ep::ACL::default().build())
+}
+
+#[cfg(not(feature = "acl"))]
+fn acl_ep() -> Result<ExecutionProviderDispatch, String> {
+    Err(ep_not_compiled("ACL", "acl"))
+}
+
+#[cfg(feature = "onednn")]
+fn onednn_ep() -> Result<ExecutionProviderDispatch, String> {
+    Ok(ep::OneDNN::default().build())
+}
+
+#[cfg(not(feature = "onednn"))]
+fn onednn_ep() -> Result<ExecutionProviderDispatch, String> {
+    Err(ep_not_compiled("oneDNN", "onednn"))
+}
+
+#[cfg(feature = "coreml")]
+fn coreml_ep() -> Result<ExecutionProviderDispatch, String> {
+    Ok(ep::CoreML::default().build())
+}
+
+#[cfg(not(feature = "coreml"))]
+fn coreml_ep() -> Result<ExecutionProviderDispatch, String> {
+    Err(ep_not_compiled("CoreML", "coreml"))
+}
+
+#[cfg(feature = "directml")]
+fn directml_ep() -> Result<ExecutionProviderDispatch, String> {
+    Ok(ep::DirectML::default().build())
+}
+
+#[cfg(not(feature = "directml"))]
+fn directml_ep() -> Result<ExecutionProviderDispatch, String> {
+    Err(ep_not_compiled("DirectML", "directml"))
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_ep() -> Result<ExecutionProviderDispatch, String> {
+    Ok(ep::ROCm::default().build())
+}
+
+#[cfg(not(feature = "rocm"))]
+fn rocm_ep() -> Result<ExecutionProviderDispatch, String> {
+    Err(ep_not_compiled("ROCm", "rocm"))
+}
+
+/// The process-wide ONNX Runtime environment, created on first use.
+///
+/// ort rc.14 made the environment explicit (`ort::init().build()`), and ONNX Runtime
+/// still allows exactly one per process. It owns the thread pools and the registered
+/// plugin execution providers - including QNN - so it has to outlive every session built
+/// from it: a process-lifetime holder, not a field of `OrtexModel`.
+static ENVIRONMENT: std::sync::Mutex<Option<ort::environment::Environment>> =
+    std::sync::Mutex::new(None);
+
+pub fn environment() -> Result<ort::environment::Environment, ort::Error> {
+    let mut guard = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+
+    if let Some(environment) = guard.as_ref() {
+        return Ok(environment.clone());
+    }
+
+    // A failed build leaves the slot empty so the next load retries: on Nerves the
+    // runtime library can be mounted after the first attempt.
+    let environment = ort::init().with_name("ortex").build()?;
+    *guard = Some(environment.clone());
+    Ok(environment)
 }
 
 /// Register the Qualcomm QNN *plugin* execution provider library, once.
@@ -181,15 +282,12 @@ pub fn register_qnn_library(provider: &str) -> Result<(), String> {
         return Err(format!("QNN plugin EP library not found at {provider}"));
     }
 
-    let env = ort::environment::current()
-        .map_err(|e| format!("could not get ONNX Runtime environment: {e}"))?;
-    let lib = env
-        .register_ep_library("QNN", provider)
+    let env = environment().map_err(|e| format!("could not get ONNX Runtime environment: {e}"))?;
+    // rc.15 removed `unregister`, and the registration lives with the environment, which
+    // is kept for the lifetime of the process.
+    env.register_ep_library("QNN", provider)
         .map_err(|e| format!("failed to register QNN plugin EP from {provider}: {e}"))?;
 
-    // Unregistering would invalidate live sessions, and the EP has to stay
-    // available for the lifetime of the process.
-    std::mem::forget(lib);
     *registered = Some(provider.to_string());
     Ok(())
 }

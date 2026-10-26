@@ -80,6 +80,10 @@ path at runtime, or set `ORT_LIB_LOCATION` at compile time to have it copied int
 `priv/native` (where the `$ORIGIN` rpath finds it). Nerves system images provide it
 system-wide. Model loads without it fail; tests need it too.
 
+The NIF asks the runtime for ONNX Runtime API version 24 (`api-24` in
+`native/ortex/Cargo.toml`), which ORT 1.24.x and newer provide, so 1.24 is the minimum
+supported runtime.
+
 ## Testing
 
 `mix test` runs the suite against `models/tinymodel.onnx`, the small model committed to
@@ -97,14 +101,17 @@ ORTEX_RESNET50=1 mix test
 
 Non-CPU execution providers are compiled in through `ort`'s cargo features. The default
 depends on the OS: `coreml` on macOS, `directml` on Windows, nothing (CPU only) on Linux.
-`ORTEX_FEATURES` overrides it with a comma-separated list of `cuda`, `tensorrt`, `coreml`
-and `directml`:
+`ORTEX_FEATURES` overrides it with a comma-separated list of `cuda`, `tensorrt`, `acl`,
+`onednn`, `rocm`, `coreml` and `directml`:
 
 ```sh
 ORTEX_FEATURES=cuda,tensorrt mix compile
 ```
 
 A feature only enables the bindings; the vendor runtime itself has to be installed already.
+Since `ort` rc.13 each provider's binding is behind its feature, so asking `Ortex.load/4`
+for a provider that was not compiled in raises with the feature name to rebuild with,
+instead of quietly running the model on the CPU.
 
 QNN is the exception. It is registered at session creation rather than compiled in, so it
 needs no feature flag. See `Ortex.load/4` for its options.
