@@ -3,31 +3,128 @@ on:
   push:
     branches: [main]
   pull_request:
+
 jobs:
-  linux:
-    runs-on: ubuntu-latest
-    name: Linux ${{ matrix.elixir }}, ${{ matrix.otp }}
+  # The runtime is a build input only in name: the crate dlopen()s libonnxruntime
+  # (`ort` `load-dynamic`, see native/ortex/Cargo.toml), so production can run a
+  # different ORT than the one compiled against and CI would never see it. Hence two
+  # runtime versions - the minimum the `api-24` feature requires (1.24.x) and today's
+  # release - crossed with the language versions.
+  #
+  #   floor  debounce: the advertised minimum (mix.exs `elixir: ~> 1.17`) on the minimum
+  #          runtime. If this row breaks, the promise in the README is broken.
+  #   devenv the pair devenv.nix actually provides (Elixir 1.18 / OTP 28); devenv.lock
+  #          pins the ORT it uses, which is why this row runs against the latest runtime.
+  #   latest today's Elixir/OTP on both ends of the runtime range.
+  #
+  # Rows are explicit rather than a cross product: 3 x 2 x 2 runners would be 12 jobs to
+  # prove combinations nobody ships.
+  test:
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.label }}
     strategy:
+      fail-fast: false
       matrix:
-        elixir: ["1.17.3"]
-        otp: ["27.1.2"]
+        include:
+          - label: Linux Elixir 1.17.3 / OTP 27.1.2 / ORT 1.24.4 (floor)
+            os: ubuntu-latest
+            elixir: "1.17.3"
+            otp: "27.1.2"
+            ort: "1.24.4"
+            ort_asset: linux-x64
+            ort_lib: libonnxruntime.so
+          - label: Linux Elixir 1.18.4 / OTP 28 / ORT 1.31.0 (devenv)
+            os: ubuntu-latest
+            elixir: "1.18.4"
+            otp: "28"
+            ort: "1.31.0"
+            ort_asset: linux-x64
+            ort_lib: libonnxruntime.so
+          - label: Linux Elixir 1.20.4 / OTP 29.1.2 / ORT 1.24.4
+            os: ubuntu-latest
+            elixir: "1.20.4"
+            otp: "29.1.2"
+            ort: "1.24.4"
+            ort_asset: linux-x64
+            ort_lib: libonnxruntime.so
+          - label: Linux Elixir 1.20.4 / OTP 29.1.2 / ORT 1.31.0 (latest)
+            os: ubuntu-latest
+            elixir: "1.20.4"
+            otp: "29.1.2"
+            ort: "1.31.0"
+            ort_asset: linux-x64
+            ort_lib: libonnxruntime.so
+          - label: macOS Elixir 1.17.3 / OTP 27.1.2 / ORT 1.24.4 (floor)
+            os: macos-latest
+            elixir: "1.17.3"
+            otp: "27.1.2"
+            ort: "1.24.4"
+            ort_asset: osx-arm64
+            ort_lib: libonnxruntime.dylib
+          - label: macOS Elixir 1.18.4 / OTP 28 / ORT 1.31.0 (devenv)
+            os: macos-latest
+            elixir: "1.18.4"
+            otp: "28"
+            ort: "1.31.0"
+            ort_asset: osx-arm64
+            ort_lib: libonnxruntime.dylib
+          - label: macOS Elixir 1.20.4 / OTP 29.1.2 / ORT 1.24.4
+            os: macos-latest
+            elixir: "1.20.4"
+            otp: "29.1.2"
+            ort: "1.24.4"
+            ort_asset: osx-arm64
+            ort_lib: libonnxruntime.dylib
+          - label: macOS Elixir 1.20.4 / OTP 29.1.2 / ORT 1.31.0 (latest)
+            os: macos-latest
+            elixir: "1.20.4"
+            otp: "29.1.2"
+            ort: "1.31.0"
+            ort_asset: osx-arm64
+            ort_lib: libonnxruntime.dylib
     env:
       MIX_ENV: test
     steps:
       - uses: actions/checkout@v6
+      - name: Read pinned Rust toolchain
+        id: rust
+        run: echo "channel=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/ortex
+      # Same OTP/Elixir on both runners: brew-installed Erlang/Elixir used to float with
+      # whatever the formula had that day, so the two could disagree.
       - uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ matrix.otp }}
           elixir-version: ${{ matrix.elixir }}
-      # The crate dlopen()s libonnxruntime at runtime (ort `load-dynamic`, see
-      # native/ortex/Cargo.toml); nothing else provides it on the runner. Pin tracks
-      # the `api-24` feature.
-      - name: Install ONNX Runtime
+      - name: Install ONNX Runtime ${{ matrix.ort }}
+        env:
+          ORT_VERSION: ${{ matrix.ort }}
+          ORT_ASSET: ${{ matrix.ort_asset }}
+          ORT_LIB: ${{ matrix.ort_lib }}
         run: |
-          curl -sSL https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz | tar -xz
-          echo "ORT_DYLIB_PATH=$GITHUB_WORKSPACE/onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so" >> "$GITHUB_ENV"
+          curl -sSL --retry 3 --retry-delay 5 "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${ORT_ASSET}-${ORT_VERSION}.tgz" | tar -xz
+          echo "ORT_DYLIB_PATH=$GITHUB_WORKSPACE/onnxruntime-${ORT_ASSET}-${ORT_VERSION}/lib/${ORT_LIB}" >> "$GITHUB_ENV"
+      # Two network dependencies, both retried: this job's job is to test the code, not
+      # Hex's CDN or a release tarball. A single Hex registry timeout used to fail the row
+      # with a misleading "Unknown package makeup in lockfile" (the real line was
+      # "Failed to fetch record for makeup from registry / :timeout"), and the same commit
+      # passed in a sibling run - a false red that cost a review cycle.
       - name: Install dependencies
-        run: mix deps.get
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if mix deps.get; then
+              exit 0
+            fi
+            echo "mix deps.get failed (attempt ${attempt}); retrying"
+            sleep $((attempt * 10))
+          done
+          exit 1
       - name: Compile and check warnings
         run: mix compile --warnings-as-errors
       - name: Check formatting
@@ -35,32 +132,52 @@ jobs:
       - name: Run tests
         run: mix test
 
-  macos:
-    runs-on: macos-latest
-    name: macOS ${{ matrix.elixir }}, ${{ matrix.otp }}
-    strategy:
-      matrix:
-        elixir: ["1.17.3"]
-        otp: ["27.1.2"]
-    env:
-      MIX_ENV: test
+  # Rust gates. The crate is ~2k lines with `unsafe` in tensor.rs/utils.rs and had no
+  # lint at all; clippy is what would have flagging the kinds of things the audit found
+  # by hand (a clone that a refcount replaces, a &Vec where a slice does).
+  rust-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/ortex
     steps:
       - uses: actions/checkout@v6
-      # Same OTP/Elixir as the Linux job: `brew install erlang@27 elixir` floated with
-      # whatever the formula had that day, so the two runners could disagree.
+      - name: Read pinned Rust toolchain
+        id: rust
+        run: echo "channel=$(awk -F'"' '/^channel/{print $2}' "$GITHUB_WORKSPACE/rust-toolchain.toml")" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/ortex
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read pinned Rust toolchain
+        id: rust
+        run: echo "channel=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        working-directory: native/ortex
+        run: cargo audit
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: ${{ matrix.otp }}
-          elixir-version: ${{ matrix.elixir }}
-      - name: Install ONNX Runtime
-        run: |
-          curl -sSL https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-osx-arm64-1.24.4.tgz | tar -xz
-          echo "ORT_DYLIB_PATH=$GITHUB_WORKSPACE/onnxruntime-osx-arm64-1.24.4/lib/libonnxruntime.dylib" >> "$GITHUB_ENV"
-      - name: Install dependencies
+          otp-version: "29.1.2"
+          elixir-version: "1.20.4"
+      - name: mix deps.get
         run: mix deps.get
-      - name: Compile and check warnings
-        run: mix compile --warnings-as-errors
-      - name: Check formatting
-        run: mix format --check-formatted
-      - name: Run tests
-        run: mix test
+      - name: mix hex.audit
+        run: mix hex.audit

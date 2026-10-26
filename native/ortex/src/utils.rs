@@ -99,7 +99,7 @@ pub fn to_binary<'a>(
     // The binary points at the tensor's own memory (enif_make_resource_binary): no copy is
     // made here. For an output straight from ONNX Runtime that memory is ORT's buffer, so
     // a full output costs one copy in the whole run instead of two.
-    let bytes = reference.to_bytes().map_err(|e| nif_error(e))?;
+    let bytes = reference.to_bytes().map_err(nif_error)?;
 
     // `Ortex.Backend.backend_transfer/3` asks for the whole tensor with a limit of 0.
     if limit == 0 {

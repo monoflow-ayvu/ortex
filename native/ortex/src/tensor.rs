@@ -89,7 +89,7 @@ impl OrtexTensor {
     /// so it is materialized first.
     pub fn reshape(&self, shape: Vec<usize>) -> rustler::NifResult<Self> {
         let shape: IxDyn = IxDyn(&shape);
-        let tensor = self.into_shared().map_err(nif_term)?;
+        let tensor = self.to_shared().map_err(nif_term)?;
 
         Ok(match tensor {
             OrtexTensor::s8(y) => OrtexTensor::s8(reshape_arc(&y, shape)?),
@@ -105,7 +105,7 @@ impl OrtexTensor {
             OrtexTensor::f32(y) => OrtexTensor::f32(reshape_arc(&y, shape)?),
             OrtexTensor::f64(y) => OrtexTensor::f64(reshape_arc(&y, shape)?),
             OrtexTensor::bool(y) => OrtexTensor::bool(reshape_arc(&y, shape)?),
-            // `into_shared` materializes this variant, so it cannot come back here.
+            // `to_shared` materializes this variant, so it cannot come back here.
             OrtexTensor::ort(value) => {
                 return Err(rustler::Error::Term(Box::new(format!(
                     "could not materialize output tensor: {}",
@@ -185,7 +185,7 @@ impl OrtexTensor {
         }
         // A strided slice is not a contiguous window of the buffer, so the result is
         // materialized: standard layout is part of this type's contract (`to_bytes`).
-        let tensor = self.into_shared().map_err(nif_term)?;
+        let tensor = self.to_shared().map_err(nif_term)?;
 
         Ok(match tensor {
             OrtexTensor::s8(y) => OrtexTensor::s8(slice_arc(&y, &slice_specs)),
@@ -238,7 +238,7 @@ impl OrtexTensor {
     /// Array variants share their buffer (refcount); an ORT-owned output has no ndarray to
     /// share, so it is copied out once - the price of an array operation on a fresh
     /// output.
-    fn into_shared(&self) -> Result<OrtexTensor, Error> {
+    fn to_shared(&self) -> Result<OrtexTensor, Error> {
         Ok(match self {
             OrtexTensor::s8(y) => OrtexTensor::s8(y.clone()),
             OrtexTensor::s16(y) => OrtexTensor::s16(y.clone()),
@@ -342,7 +342,7 @@ fn reshape_arc<T: Clone>(
 
 fn slice_array<'a, T, D>(
     array: &'a ArcArray<T, D>,
-    slice_specs: &'a Vec<(isize, Option<isize>, isize)>,
+    slice_specs: &'a [(isize, Option<isize>, isize)],
 ) -> ArrayView<'a, T, D>
 where
     D: Dimension,
@@ -355,7 +355,7 @@ where
 
 fn slice_arc<'a, T, D>(
     array: &'a ArcArray<T, D>,
-    slice_specs: &'a Vec<(isize, Option<isize>, isize)>,
+    slice_specs: &'a [(isize, Option<isize>, isize)],
 ) -> ArcArray<T, D>
 where
     T: Clone,
@@ -364,7 +364,7 @@ where
     slice_array(array, slice_specs).to_owned().into_shared()
 }
 
-fn get_bytes<'a, T>(array: &'a ArcArray<T, IxDyn>) -> &'a [u8] {
+fn get_bytes<T>(array: &ArcArray<T, IxDyn>) -> &[u8] {
     // `to_binary` hands this to the BEAM as one flat byte range, which is only the
     // contents of the tensor under a standard (C-order, no offset) layout. Every array
     // reaching here is normalized to that layout on construction - see the type's docs -

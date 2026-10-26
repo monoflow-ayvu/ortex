@@ -28,6 +28,9 @@ defmodule Ortex.TestServing do
     end
   end
 
+  # Same shape caveat as the batched-vs-single test in Ortex.TestModel: the batch kernel is
+  # not bit-identical to the single-row kernel, so this checks row identity within a
+  # tolerance rather than exact bytes.
   test "a three-row batch keeps row order", %{model: model} do
     serving = Nx.Serving.new(Ortex.Serving, model)
     {batched, _, _} = Nx.Serving.run(serving, batch([1, 2, 3]))
@@ -37,10 +40,12 @@ defmodule Ortex.TestServing do
     for {row, index} <- Enum.with_index([1, 2, 3]) do
       {single, _, _} = Nx.Serving.run(serving, batch([row]))
 
-      assert batched[index]
-             |> Nx.backend_transfer()
-             |> Nx.to_flat_list() ==
-               single |> Nx.backend_transfer() |> Nx.to_flat_list()
+      assert Nx.all_close(
+               batched[index] |> Nx.backend_transfer(),
+               single |> Nx.backend_transfer(),
+               atol: 1.0e-5
+             )
+             |> Nx.to_number() == 1
     end
   end
 
