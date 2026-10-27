@@ -4,11 +4,11 @@ All notable changes to this project are documented here. The format is
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — release as `0.4.0`
+## [0.4.0] - 2026-10-27
 
-Release the next version as **0.4.0**: `Ortex.load/4` changed from returning the model to
-returning `{:ok, model} | {:error, %Ortex.Error{}}`, which is a breaking change for every
-caller. `Ortex.load!/4` is the old behaviour.
+`Ortex.load/4` changed from returning the model to returning
+`{:ok, model} | {:error, %Ortex.Error{}}`, which is a breaking change for every caller and
+why this is a minor bump. `Ortex.load!/4` is the old behaviour.
 
 Everything below came out of the ortex audit (issues MONO-144/145 and the stages under it).
 The version numbers in `mix.exs` and `native/ortex/Cargo.toml` are bumped by hand; the

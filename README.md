@@ -160,7 +160,7 @@ runs.
 ```elixir
 def deps do
   [
-    {:ortex, "~> 0.3.1"}
+    {:ortex, "~> 0.4.0"}
   ]
 end
 ```
