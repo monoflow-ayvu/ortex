@@ -248,6 +248,78 @@ fn rocm_ep(provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
     Err(ep_not_compiled(provider, "ROCm", "rocm"))
 }
 
+/// Where ONNX Runtime's threads come from.
+///
+/// ONNX Runtime builds either one pool per session - one intra-op thread per core *per
+/// session*, so `sessions:` and the number of models multiply them - or one *global* pool
+/// that every session in the process shares (`CreateEnvWithGlobalThreadPools`). The pool
+/// belongs to the environment, which is one per process, so this is a process-wide choice
+/// read once, from the environment, when the first model is loaded.
+#[derive(Debug)]
+pub enum PoolMode {
+    /// One shared pool. The values are what the caller asked for; `None` keeps ONNX
+    /// Runtime's default (one intra-op thread per core, one inter-op thread, spinning on).
+    Shared {
+        intra: Option<usize>,
+        inter: Option<usize>,
+        spin: Option<bool>,
+    },
+    /// One pool per session: the shape before the global pool existed.
+    PerSession,
+}
+
+/// Reads the pool configuration from variables of the same name, so the parse is testable
+/// without touching the real process environment.
+fn pool_mode_from(get: impl Fn(&str) -> Option<String>) -> Result<PoolMode, String> {
+    fn enabled(key: &str, value: &str) -> Result<bool, String> {
+        match value {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            other => Err(format!("{key} must be a boolean, got {other:?}")),
+        }
+    }
+
+    fn count(key: &str, value: &str) -> Result<usize, String> {
+        value
+            .parse()
+            .map_err(|_| format!("{key} must be a non-negative integer, got {value:?}"))
+    }
+
+    fn read<'a>(get: &impl Fn(&str) -> Option<String>, key: &'a str) -> Option<(&'a str, String)> {
+        get(key).map(|value| (key, value.trim().to_string()))
+    }
+
+    if let Some((key, value)) = read(&get, "ORTEX_GLOBAL_THREAD_POOL") {
+        if !enabled(key, &value)? {
+            return Ok(PoolMode::PerSession);
+        }
+    }
+
+    let intra = read(&get, "ORTEX_INTRA_THREADS")
+        .map(|(k, v)| count(k, &v))
+        .transpose()?;
+    let inter = read(&get, "ORTEX_INTER_THREADS")
+        .map(|(k, v)| count(k, &v))
+        .transpose()?;
+    let spin = read(&get, "ORTEX_SPIN_CONTROL")
+        .map(|(k, v)| enabled(k, &v))
+        .transpose()?;
+
+    Ok(PoolMode::Shared { intra, inter, spin })
+}
+
+/// The pool mode for this process. Parsed once: the environment and its pools are built
+/// once, so re-reading the variables later would only lie about what is in effect.
+pub fn pool_mode() -> Result<&'static PoolMode, OrtexError> {
+    static MODE: std::sync::LazyLock<Result<PoolMode, String>> =
+        std::sync::LazyLock::new(|| pool_mode_from(|key| std::env::var(key).ok()));
+
+    match &*MODE {
+        Ok(mode) => Ok(mode),
+        Err(message) => Err(OrtexError::invalid_option(message)),
+    }
+}
+
 /// The process-wide ONNX Runtime environment, created on first use.
 ///
 /// ort rc.14 made the environment explicit (`ort::init().build()`), and ONNX Runtime
@@ -257,16 +329,59 @@ fn rocm_ep(provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
 static ENVIRONMENT: std::sync::Mutex<Option<ort::environment::Environment>> =
     std::sync::Mutex::new(None);
 
-pub fn environment() -> Result<ort::environment::Environment, ort::Error> {
+pub fn environment() -> Result<ort::environment::Environment, OrtexError> {
     let mut guard = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(environment) = guard.as_ref() {
         return Ok(environment.clone());
     }
 
+    let mut init = ort::init().with_name("ortex");
+
+    match pool_mode()? {
+        PoolMode::Shared { intra, inter, spin } => {
+            let mut options = ort::environment::GlobalThreadPoolOptions::default();
+            if let Some(intra) = *intra {
+                options = options.with_intra_threads(intra)?;
+            }
+            if let Some(inter) = *inter {
+                options = options.with_inter_threads(inter)?;
+            }
+            if let Some(spin) = *spin {
+                options = options.with_spin_control(spin)?;
+            }
+
+            // Said once per process, at the point the pool is built: a performance default
+            // that changes the thread count is not something to switch on silently.
+            eprintln!(
+                "ortex: ONNX Runtime global thread pool {intra}, {inter}, {spin}; shared by \
+                 every session (ORTEX_GLOBAL_THREAD_POOL=0 gives each session its own)",
+                intra = match intra {
+                    Some(n) => format!("intra_threads={n}"),
+                    None => "intra_threads=cores".to_string(),
+                },
+                inter = match inter {
+                    Some(n) => format!("inter_threads={n}"),
+                    None => "inter_threads=1".to_string(),
+                },
+                spin = match spin {
+                    Some(true) => "spinning on",
+                    Some(false) => "spinning off",
+                    None => "spinning on (default)",
+                },
+            );
+
+            init = init.with_global_thread_pool(options);
+        }
+        PoolMode::PerSession => eprintln!(
+            "ortex: ORTEX_GLOBAL_THREAD_POOL=0, every session builds its own ONNX Runtime \
+             thread pools (one intra-op thread per core each)"
+        ),
+    }
+
     // A failed build leaves the slot empty so the next load retries: on Nerves the
     // runtime library can be mounted after the first attempt.
-    let environment = ort::init().with_name("ortex").build()?;
+    let environment = init.build()?;
     *guard = Some(environment.clone());
     Ok(environment)
 }
@@ -305,8 +420,7 @@ pub fn register_qnn_library(provider: &str) -> Result<(), OrtexError> {
         )));
     }
 
-    let env = environment()
-        .map_err(|e| OrtexError::qnn(format!("could not get ONNX Runtime environment: {e}")))?;
+    let env = environment()?;
     // rc.15 removed `unregister`, and the registration lives with the environment, which
     // is kept for the lifetime of the process.
     env.register_ep_library("QNN", provider).map_err(|e| {

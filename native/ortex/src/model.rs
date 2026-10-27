@@ -362,6 +362,29 @@ pub fn init(
         }
     }
 
+    // The process shares one thread pool by default (`utils::PoolMode`). A session that
+    // named a thread setting keeps its own instead: ONNX Runtime ignores a session's thread
+    // options once the global pool is in effect, so sharing it would silently replace the
+    // value the caller asked for. The QNN defaults above are exactly such a value - intra: 1
+    // with spinning off is a measurement, not cosmetics - so a QNN load keeps its own pool
+    // too, and its thread count is unchanged by the global pool.
+    let names_threads = intra_threads.is_some()
+        || inter_threads.is_some()
+        || intra_op_spinning.is_some()
+        || inter_op_spinning.is_some();
+    let own_pool = matches!(
+        crate::utils::pool_mode()?,
+        crate::utils::PoolMode::Shared { .. }
+    ) && names_threads;
+
+    if own_pool {
+        eprintln!(
+            "ortex: this model keeps its own ONNX Runtime thread pool (threads: was set, or \
+             the QNN defaults applied); the shared pool is for models that leave the thread \
+             options alone"
+        );
+    }
+
     // One builder chain, run once per pooled session. `commit_from_file` consumes the
     // builder, so the chain has to live in a closure rather than be reused.
     let environment = crate::utils::environment()?;
@@ -373,6 +396,9 @@ pub fn init(
 
         if let Some(level) = log_level {
             builder = builder.with_log_level(level)?;
+        }
+        if own_pool {
+            builder = builder.with_independent_thread_pool()?;
         }
         if let Some(value) = intra_threads {
             builder = builder.with_intra_threads(value)?;

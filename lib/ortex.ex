@@ -27,12 +27,15 @@ defmodule Ortex do
     * `sessions: N` - loads N copies of the same graph into the model. An ONNX Runtime
       session is exclusive (`Session::run` takes `&mut self`), so with the default of 1
       every inference on the model is serialised and `Nx.Serving` partitions/batch_size
-      only queue work. Each pooled session loads the graph and its thread pools again, so
-      the extra memory is proportional to N.
+      only queue work. Each pooled session is another copy of the graph, so the extra
+      memory is proportional to N; the thread pools are shared, so the threads are not.
 
     * `threads: [...]` - ONNX Runtime's thread pools: `intra:` (intra-op threads),
       `inter:` (inter-op threads), `intra_op_spinning:` and `inter_op_spinning:`
       (booleans). These apply to every provider, which is why they are not QNN options.
+      Naming any of them gives this model its own pool instead of the process-wide one -
+      see below - because ONNX Runtime ignores a session's thread options while it is
+      sharing the global pool.
 
     * `trace: path` - writes an ORT trace (EP registration, device selection, per-node
       placement) to that file. Needs the `trace` cargo feature - see the README - and is
@@ -50,10 +53,30 @@ defmodule Ortex do
   node: `threads: [intra: 1, intra_op_spinning: false]`. The default pool's spinning workers
   burn every core while the NPU runs, which measurably throttles the package (24 -> 20.6 fps
   on a Dragon Q6A). Override with `threads:`; CPU-side providers keep onnxruntime's defaults
-  for `inter`.
+  for `inter`. A QNN load always gets its own pool - the shared pool would override those two
+  values - so its thread count is unaffected by the global pool below.
 
   The flat form (`intra_threads: 1`, `trace_path: ...`, `htp_arch: 68`, `"env.NAME"`) is
   accepted for one release cycle, translated to the groups above and warned about.
+
+  ## Thread pools
+
+  Unless a model names a `threads:` value, sessions share one ONNX Runtime *global* thread
+  pool per process: `intra_op` one thread per core, `inter_op` one, created with the
+  environment at the first load and fixed for the life of the VM. Neither the number of
+  models nor `sessions:` multiplies it, which is the difference from building a pool per
+  session: three models on a 6-core board used to be ~18 threads before any inference ran.
+
+  It is configured through the environment, read once at that first load:
+
+    * `ORTEX_INTRA_THREADS` / `ORTEX_INTER_THREADS` - pool size (unset: onnxruntime's
+      defaults).
+    * `ORTEX_SPIN_CONTROL=0` - park idle pool threads instead of spinning.
+    * `ORTEX_GLOBAL_THREAD_POOL=0` - one pool per session, the behaviour before this existed.
+
+  A model loaded with any `threads:` option (and, as above, any `:qnn` load) opts out and
+  builds its own pool, so its thread count follows the per-session arithmetic instead. It
+  says so once on stderr at load.
 
   ## Examples
 
