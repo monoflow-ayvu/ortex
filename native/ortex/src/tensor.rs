@@ -139,6 +139,33 @@ impl OrtexTensor {
         }
     }
 
+    /// The ONNX Runtime element type of the buffer.
+    ///
+    /// `bool` is reported as `Bool` even though Nx hands it over as u8: the rewrite in
+    /// `model::run` is what makes it a bool tensor.
+    pub fn element_type(&self) -> TensorElementType {
+        match self {
+            OrtexTensor::s8(_) => TensorElementType::Int8,
+            OrtexTensor::s16(_) => TensorElementType::Int16,
+            OrtexTensor::s32(_) => TensorElementType::Int32,
+            OrtexTensor::s64(_) => TensorElementType::Int64,
+            OrtexTensor::u8(_) => TensorElementType::Uint8,
+            OrtexTensor::u16(_) => TensorElementType::Uint16,
+            OrtexTensor::u32(_) => TensorElementType::Uint32,
+            OrtexTensor::u64(_) => TensorElementType::Uint64,
+            OrtexTensor::f16(_) => TensorElementType::Float16,
+            OrtexTensor::bf16(_) => TensorElementType::Bfloat16,
+            OrtexTensor::f32(_) => TensorElementType::Float32,
+            OrtexTensor::f64(_) => TensorElementType::Float64,
+            OrtexTensor::bool(_) => TensorElementType::Bool,
+            OrtexTensor::ort(value) => match value.dtype() {
+                ValueType::Tensor { ty, .. } => *ty,
+                // Non-tensor outputs are rejected in `model::run` before they get here.
+                other => panic!("not a tensor: {other}"),
+            },
+        }
+    }
+
     /// Bytes this tensor's buffer occupies.
     ///
     /// For the ndarray variants that is `len * size_of::<T>()`; for an ORT-owned output it

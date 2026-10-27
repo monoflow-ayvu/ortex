@@ -31,6 +31,16 @@ iex> output |> Nx.backend_transfer() |> Nx.argmax
 Inspecting a model shows the expected inputs, outputs, data types, and shapes. Axes with
 `nil` represent a dynamic size.
 
+Inputs are positional by default, and can be named instead: a map (or a list of pairs) is
+matched against the model's own input names, which takes ordering out of the contract. Both
+forms are validated against the declared dtype and shape before the run, so a swapped pair
+of same-typed inputs fails with the input name and axis instead of returning a plausible
+wrong answer.
+
+```elixir
+Ortex.run(model, %{"x" => x, "y" => y})
+```
+
 To see more real world examples see the `examples` folder.
 
 ### Serving

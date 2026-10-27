@@ -24,9 +24,11 @@ defmodule Ortex.Model do
 
   @doc false
   def load(path, eps \\ [:cpu], opt \\ 3, opts \\ []) do
-    case Ortex.Native.init(path, eps, opt, stringify_opts(opts)) do
-      {:error, reason} -> {:error, Ortex.Error.from_nif(reason)}
-      model -> {:ok, %Ortex.Model{reference: model}}
+    with {:ok, nif_opts} <- Ortex.Options.to_nif(opts) do
+      case Ortex.Native.init(path, eps, opt, nif_opts) do
+        {:error, reason} -> {:error, Ortex.Error.from_nif(reason)}
+        model -> {:ok, %Ortex.Model{reference: model}}
+      end
     end
   end
 
@@ -38,30 +40,51 @@ defmodule Ortex.Model do
     end
   end
 
-  # The NIF takes both key and value as strings; keys prefixed "env." it exports to the
-  # OS environment, the only place QNN's getenv() lookups will find them.
-  defp stringify_opts(opts), do: Enum.map(opts, fn {k, v} -> {to_string(k), to_string(v)} end)
-
   @doc false
-  def run(%Ortex.Model{} = model, tensor) when not is_tuple(tensor) do
+  def run(%Ortex.Model{} = model, %Nx.Tensor{} = tensor) do
     run(model, {tensor})
   end
 
-  @doc false
-  def run(%Ortex.Model{reference: model}, tensors) do
-    # Move tensors into Ortex backend and pass the reference to the Ortex NIF
-    output =
-      case Ortex.Native.run(
-             model,
-             tensors
-             |> Tuple.to_list()
-             |> Enum.map(fn x -> x |> Nx.backend_transfer(Ortex.Backend) end)
-             |> Enum.map(fn %Nx.Tensor{data: %Ortex.Backend{ref: x}} -> x end)
-           ) do
-        {:error, reason} -> raise Ortex.Error.from_nif(reason)
-        output -> output
-      end
+  # Positional: the NIF checks each tensor against the model's declared dtype and shape,
+  # so a swapped pair of same-typed inputs fails instead of producing a plausible result.
+  def run(%Ortex.Model{reference: model}, tensors) when is_tuple(tensors) do
+    model
+    |> Ortex.Native.run(tensors |> Tuple.to_list() |> Enum.map(&to_ref/1))
+    |> unwrap()
+  end
 
+  # Named: a map (or a list of pairs) keys the inputs by the graph's own input names -
+  # `%{"x" => x, "y" => y}` - which removes positional ordering from the contract.
+  def run(%Ortex.Model{reference: model}, inputs) when is_map(inputs) do
+    model
+    |> Ortex.Native.run_named(
+      inputs
+      |> Enum.map(fn {name, tensor} -> {to_string(name), to_ref(tensor)} end)
+    )
+    |> unwrap()
+  end
+
+  def run(%Ortex.Model{reference: model}, inputs) when is_list(inputs) do
+    model
+    |> Ortex.Native.run_named(Enum.map(inputs, &named_ref!/1))
+    |> unwrap()
+  end
+
+  defp named_ref!({name, tensor}), do: {to_string(name), to_ref(tensor)}
+
+  defp named_ref!(other) do
+    raise ArgumentError,
+          "expected {name, tensor} pairs when passing a list of inputs, got: #{inspect(other)}"
+  end
+
+  defp to_ref(tensor) do
+    %Nx.Tensor{data: %Ortex.Backend{ref: ref}} = Nx.backend_transfer(tensor, Ortex.Backend)
+    ref
+  end
+
+  defp unwrap({:error, reason}), do: raise(Ortex.Error.from_nif(reason))
+
+  defp unwrap(output) do
     # Pack the output into new Ortex.Backend tensor(s)
     output
     |> Enum.map(fn {ref, shape, dtype_atom, dtype_bits} ->
