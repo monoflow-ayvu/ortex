@@ -75,4 +75,22 @@ defmodule Ortex do
 
   """
   defdelegate run(model, tensors), to: Ortex.Model
+
+  @doc """
+  Bytes of tensor data currently held by live Ortex tensors.
+
+  Ortex tensors live on the Rust heap, invisible to `:erlang.memory/0` and to the BEAM's
+  garbage collector: holding onto them grows the process RSS without creating GC
+  pressure. This is that number, so a serving cache or a queue of batches can be watched
+  before it becomes an OOM.
+
+  See `Ortex.Memory` for the exact accounting and the `[:ortex, :memory]` telemetry event.
+
+  ## Examples
+
+      iex> Ortex.memory()
+      0
+
+  """
+  defdelegate memory, to: Ortex.Memory, as: :bytes
 end

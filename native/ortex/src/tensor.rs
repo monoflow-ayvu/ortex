@@ -6,6 +6,8 @@ use ort::session::SessionInputValue;
 use ort::value::{TensorElementType, TensorRef, Value, ValueType};
 use ort::Error;
 use rustler::{Atom, Resource, ResourceArc};
+use std::ops::Deref;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::constants::ortex_atoms;
 
@@ -51,8 +53,61 @@ pub enum OrtexTensor {
     ort(Value),
 }
 
+/// Bytes of tensor data currently alive behind `TensorResource` handles.
+///
+/// Everything in this module allocates on the Rust heap and reaches the BEAM only as an
+/// opaque resource: `:erlang.memory/0`, the GC and the refc binary accounting cannot see
+/// it. A process that keeps tensors alive (a serving cache, a queue of batches) grows RSS
+/// without creating any GC pressure, and the first symptom is the OOM killer - which on a
+/// Nerves board with a fixed RAM budget is a reboot. This counter is that number, exposed
+/// by `Ortex.memory/0` and `Ortex.Memory.poll/0`.
+static TENSOR_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Bytes of tensor data held by live `TensorResource` handles.
+pub fn allocated_bytes() -> usize {
+    TENSOR_BYTES.load(Ordering::Relaxed)
+}
+
+/// A tensor handed to the BEAM, with its size accounted for.
+///
+/// The wrapper exists because the BEAM's GC is the only thing that knows when a resource
+/// really dies: `#[rustler::resource_impl]` drops the value exactly once, when the last
+/// reference goes away. Accounting inside [`OrtexTensor`] would either count transient
+/// conversion values that never reach the BEAM or leak the count entirely.
+///
+/// A buffer shared by two live handles (`reshape`/`flatten` hand back the same allocation)
+/// is counted once per handle, so this is an upper bound on unique bytes; it is exact for
+/// the shapes that matter - fresh allocations and ORT-owned outputs.
+pub struct TensorResource {
+    tensor: OrtexTensor,
+    bytes: usize,
+}
+
+impl TensorResource {
+    /// Wraps a tensor as a BEAM resource, charging its buffer to the counter.
+    pub fn new(tensor: OrtexTensor) -> ResourceArc<TensorResource> {
+        let bytes = tensor.byte_len();
+        TENSOR_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        ResourceArc::new(TensorResource { tensor, bytes })
+    }
+}
+
+impl Drop for TensorResource {
+    fn drop(&mut self) {
+        TENSOR_BYTES.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+impl Deref for TensorResource {
+    type Target = OrtexTensor;
+
+    fn deref(&self) -> &OrtexTensor {
+        &self.tensor
+    }
+}
+
 #[rustler::resource_impl(name = "OrtexTensor")]
-impl Resource for OrtexTensor {}
+impl Resource for TensorResource {}
 
 // `ort::Value` holds raw pointers and so is not unwind-safe; rustler's blanket
 // `NifReturnable` impl requires it to encode the resource term. Encoding only touches the
@@ -60,6 +115,8 @@ impl Resource for OrtexTensor {}
 // OrtexModel.
 impl std::panic::RefUnwindSafe for OrtexTensor {}
 impl std::panic::UnwindSafe for OrtexTensor {}
+impl std::panic::RefUnwindSafe for TensorResource {}
+impl std::panic::UnwindSafe for TensorResource {}
 
 impl OrtexTensor {
     pub fn shape(&self) -> Vec<usize> {
@@ -78,6 +135,36 @@ impl OrtexTensor {
             OrtexTensor::f64(y) => y.shape().to_owned(),
             OrtexTensor::bool(y) => y.shape().to_owned(),
             OrtexTensor::ort(value) => value_shape(value),
+        }
+    }
+
+    /// Bytes this tensor's buffer occupies.
+    ///
+    /// For the ndarray variants that is `len * size_of::<T>()`; for an ORT-owned output it
+    /// is the element count times the element size, which is what ORT allocated.
+    pub fn byte_len(&self) -> usize {
+        fn array_bytes<T>(array: &ArcArray<T, IxDyn>) -> usize {
+            array.len() * std::mem::size_of::<T>()
+        }
+
+        match self {
+            OrtexTensor::s8(y) => array_bytes(y),
+            OrtexTensor::s16(y) => array_bytes(y),
+            OrtexTensor::s32(y) => array_bytes(y),
+            OrtexTensor::s64(y) => array_bytes(y),
+            OrtexTensor::u8(y) => array_bytes(y),
+            OrtexTensor::u16(y) => array_bytes(y),
+            OrtexTensor::u32(y) => array_bytes(y),
+            OrtexTensor::u64(y) => array_bytes(y),
+            OrtexTensor::f16(y) => array_bytes(y),
+            OrtexTensor::bf16(y) => array_bytes(y),
+            OrtexTensor::f32(y) => array_bytes(y),
+            OrtexTensor::f64(y) => array_bytes(y),
+            OrtexTensor::bool(y) => array_bytes(y),
+            OrtexTensor::ort(value) => {
+                let (_, bits) = value_dtype(value);
+                value_shape(value).iter().product::<usize>() * (bits / 8)
+            }
         }
     }
 
@@ -502,16 +589,16 @@ macro_rules! concatenate {
 }
 
 pub fn concatenate(
-    tensors: Vec<ResourceArc<OrtexTensor>>,
+    tensors: Vec<ResourceArc<TensorResource>>,
     dtype: (&str, usize),
     axis: usize,
 ) -> Result<OrtexTensor, Error> {
     // An ORT-owned output has no ndarray for the macro below to view; materialize it once
     // for this concatenation. Array variants are shared, not copied.
-    let tensors: Vec<ResourceArc<OrtexTensor>> = tensors
+    let tensors: Vec<ResourceArc<TensorResource>> = tensors
         .iter()
-        .map(|tensor| match &**tensor {
-            OrtexTensor::ort(value) => Ok(ResourceArc::new(OrtexTensor::try_from(value)?)),
+        .map(|tensor| match &tensor.tensor {
+            OrtexTensor::ort(value) => Ok(TensorResource::new(OrtexTensor::try_from(value)?)),
             _ => Ok(tensor.clone()),
         })
         .collect::<Result<_, Error>>()?;

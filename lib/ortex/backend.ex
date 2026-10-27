@@ -6,6 +6,12 @@ defmodule Ortex.Backend do
   are not implemented for this (although they may be in the future). This is mainly
   for ergonomic tensor construction and deconstruction from Ortex inputs and outputs.
 
+  The tensors are storage-only: the data lives in a Rust buffer behind an opaque
+  resource, not in a BEAM binary. `:erlang.memory/0` does not see it and the collector
+  does not feel pressure from it, so a tensor kept alive (in a cache, a queue, a
+  process state) only shows up as process RSS. `Ortex.memory/0` reports the total held
+  this way.
+
   Since this does not implement most `Nx` operations, it's best *NOT* to set this as
   the default backend.
   """
