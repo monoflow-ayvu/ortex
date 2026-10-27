@@ -41,33 +41,59 @@ defmodule Ortex.Model do
   end
 
   @doc false
-  def run(%Ortex.Model{} = model, %Nx.Tensor{} = tensor) do
-    run(model, {tensor})
-  end
+  def run(%Ortex.Model{} = model, %Nx.Tensor{} = tensor), do: run(model, {tensor}, [])
+
+  def run(%Ortex.Model{} = model, inputs), do: run(model, inputs, [])
 
   # Positional: the NIF checks each tensor against the model's declared dtype and shape,
   # so a swapped pair of same-typed inputs fails instead of producing a plausible result.
-  def run(%Ortex.Model{reference: model}, tensors) when is_tuple(tensors) do
+  def run(%Ortex.Model{reference: model}, tensors, opts) when is_tuple(tensors) do
+    refs = tensors |> Tuple.to_list() |> Enum.map(&to_ref/1)
+
     model
-    |> Ortex.Native.run(tensors |> Tuple.to_list() |> Enum.map(&to_ref/1))
+    |> call(:run, :run_with_options, refs, opts)
     |> unwrap()
   end
 
   # Named: a map (or a list of pairs) keys the inputs by the graph's own input names -
   # `%{"x" => x, "y" => y}` - which removes positional ordering from the contract.
-  def run(%Ortex.Model{reference: model}, inputs) when is_map(inputs) do
+  def run(%Ortex.Model{reference: model}, inputs, opts) when is_map(inputs) do
+    refs = Enum.map(inputs, fn {name, tensor} -> {to_string(name), to_ref(tensor)} end)
+
     model
-    |> Ortex.Native.run_named(
-      inputs
-      |> Enum.map(fn {name, tensor} -> {to_string(name), to_ref(tensor)} end)
-    )
+    |> call(:run_named, :run_named_with_options, refs, opts)
     |> unwrap()
   end
 
-  def run(%Ortex.Model{reference: model}, inputs) when is_list(inputs) do
+  def run(%Ortex.Model{reference: model}, inputs, opts) when is_list(inputs) do
+    refs = Enum.map(inputs, &named_ref!/1)
+
     model
-    |> Ortex.Native.run_named(Enum.map(inputs, &named_ref!/1))
+    |> call(:run_named, :run_named_with_options, refs, opts)
     |> unwrap()
+  end
+
+  # The cancellation handle only exists when the caller made one: building a RunOptions per
+  # inference for the common case would be a syscall per run for nothing.
+  defp call(model, plain, _with_options, inputs, []),
+    do: apply(Ortex.Native, plain, [model, inputs])
+
+  defp call(model, _plain, with_options, inputs, opts),
+    do: apply(Ortex.Native, with_options, [model, inputs, run_options_ref!(opts)])
+
+  defp run_options_ref!(opts) do
+    case Keyword.fetch(opts, :run_options) do
+      {:ok, %Ortex.RunOptions{ref: ref}} ->
+        ref
+
+      {:ok, other} ->
+        raise ArgumentError,
+              "run_options: must be an Ortex.RunOptions, got: #{inspect(other)}"
+
+      :error ->
+        raise ArgumentError,
+              "unknown run option(s): #{inspect(Keyword.keys(opts))}; the only one is :run_options"
+    end
   end
 
   defp named_ref!({name, tensor}), do: {to_string(name), to_ref(tensor)}

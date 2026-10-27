@@ -21,7 +21,15 @@ defmodule Ortex.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   def run(_model, _inputs), do: :erlang.nif_error(:nif_not_loaded)
+  def run_with_options(_model, _inputs, _options), do: :erlang.nif_error(:nif_not_loaded)
   def run_named(_model, _inputs), do: :erlang.nif_error(:nif_not_loaded)
+
+  def run_named_with_options(_model, _inputs, _options),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def run_options_new(_tag), do: :erlang.nif_error(:nif_not_loaded)
+  def run_options_terminate(_options), do: :erlang.nif_error(:nif_not_loaded)
+  def run_options_unterminate(_options), do: :erlang.nif_error(:nif_not_loaded)
   def memory_usage, do: :erlang.nif_error(:nif_not_loaded)
   def from_binary(_bin, _shape, _type), do: :erlang.nif_error(:nif_not_loaded)
   def to_binary(_reference, _bits, _limit), do: :erlang.nif_error(:nif_not_loaded)

@@ -7,10 +7,12 @@
 mod constants;
 mod error;
 mod model;
+mod run_options;
 mod tensor;
 mod utils;
 
 use model::{IoSpec, RunOutput};
+use run_options::RunOptionsResource;
 use tensor::TensorResource;
 
 use rustler::types::Binary;
@@ -45,7 +47,21 @@ fn run(
     model: ResourceArc<model::OrtexModel>,
     inputs: Vec<ResourceArc<TensorResource>>,
 ) -> NifResult<Vec<RunOutput>> {
-    Ok(model::run(model, model::Inputs::Positional(inputs))?)
+    Ok(model::run(model, model::Inputs::Positional(inputs), None)?)
+}
+
+/// `run/2` with a cancellation handle: another process can terminate this run.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn run_with_options(
+    model: ResourceArc<model::OrtexModel>,
+    inputs: Vec<ResourceArc<TensorResource>>,
+    options: ResourceArc<RunOptionsResource>,
+) -> NifResult<Vec<RunOutput>> {
+    Ok(model::run(
+        model,
+        model::Inputs::Positional(inputs),
+        Some(&options.0),
+    )?)
 }
 
 /// Same as `run/2`, with inputs addressed by the model's own input names.
@@ -54,7 +70,47 @@ fn run_named(
     model: ResourceArc<model::OrtexModel>,
     inputs: Vec<(String, ResourceArc<TensorResource>)>,
 ) -> NifResult<Vec<RunOutput>> {
-    Ok(model::run(model, model::Inputs::Named(inputs))?)
+    Ok(model::run(model, model::Inputs::Named(inputs), None)?)
+}
+
+/// `run_named/2` with a cancellation handle.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn run_named_with_options(
+    model: ResourceArc<model::OrtexModel>,
+    inputs: Vec<(String, ResourceArc<TensorResource>)>,
+    options: ResourceArc<RunOptionsResource>,
+) -> NifResult<Vec<RunOutput>> {
+    Ok(model::run(
+        model,
+        model::Inputs::Named(inputs),
+        Some(&options.0),
+    )?)
+}
+
+#[rustler::nif]
+fn run_options_new(tag: Option<String>) -> NifResult<ResourceArc<RunOptionsResource>> {
+    RunOptionsResource::new(tag)
+}
+
+// `()` would cross the NIF as `{}`; `:ok` is what the Elixir side matches on.
+#[rustler::nif]
+fn run_options_terminate(options: ResourceArc<RunOptionsResource>) -> NifResult<Atom> {
+    options
+        .0
+        .terminate()
+        .map_err(error::OrtexError::onnxruntime)?;
+
+    Ok(constants::ortex_atoms::ok())
+}
+
+#[rustler::nif]
+fn run_options_unterminate(options: ResourceArc<RunOptionsResource>) -> NifResult<Atom> {
+    options
+        .0
+        .unterminate()
+        .map_err(error::OrtexError::onnxruntime)?;
+
+    Ok(constants::ortex_atoms::ok())
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]

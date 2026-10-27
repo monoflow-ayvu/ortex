@@ -26,6 +26,8 @@ pub mod ortex_atoms {
         onednn, coreml, directml, rocm, qnn,
         // `Ortex.Error.reason` values - a closed set, so the BEAM can match on them
         // instead of parsing a message.
-        onnxruntime, invalid_option, invalid_input, execution_provider
+        onnxruntime, invalid_option, invalid_input, execution_provider,
+        // NIF return for actions that have no value (`RunOptions` control).
+        ok
     }
 }
