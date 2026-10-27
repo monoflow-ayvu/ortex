@@ -72,7 +72,15 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read pinned Rust toolchain
+        id: rust
+        run: echo "channel=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # rust-toolchain.toml is the single source of truth: a floating `stable` here
+          # meant a new compiler could change the published artifact with no change in
+          # this repo.
+          toolchain: ${{ steps.rust.outputs.channel }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native/ortex
@@ -185,11 +193,15 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/checksum_nifs.py dist "${VERSION}"
           cat checksum-Elixir.Ortex.Native.exs
+      # `generate_release_notes` fills the body from the PRs (and first-time contributors)
+      # since the previous tag, so a release is never just a tag with assets: CHANGELOG.md
+      # says what changed by hand, this says what changed by commit.
       - name: Publish release assets
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.version.outputs.version }}
           name: v${{ needs.version.outputs.version }}
+          generate_release_notes: true
           files: |
             dist/*.so.tar.gz
             checksum-Elixir.Ortex.Native.exs

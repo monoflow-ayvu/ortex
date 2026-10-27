@@ -1,0 +1,10 @@
+# Pinned so the released artifact is reproducible: without this, the release workflow
+# compiled with "whatever stable was that day", and a new stable can break a published
+# NIF with no change in this repo (ort documents layout changes in Rust 1.100, and
+# rc.14+ breaks with copy-dylibs on older compilers).
+#
+# MSRV is in native/ortex/Cargo.toml (rust-version = "1.92", ort's own floor). This pin is
+# the toolchain everything is built and tested with; CI installs exactly this.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

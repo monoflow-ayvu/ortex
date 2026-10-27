@@ -353,7 +353,10 @@ where
     })
 }
 
-fn slice_arc<'a, T, D>(array: &'a ArcArray<T, D>, slice_specs: &'a Vec<(isize, Option<isize>, isize)>) -> ArcArray<T, D>
+fn slice_arc<'a, T, D>(
+    array: &'a ArcArray<T, D>,
+    slice_specs: &'a Vec<(isize, Option<isize>, isize)>,
+) -> ArcArray<T, D>
 where
     T: Clone,
     D: Dimension,
@@ -415,9 +418,11 @@ impl TryFrom<&Value> for OrtexTensor {
             TensorElementType::Int32 => extract!(s32, i32),
             TensorElementType::Int64 => extract!(s64, i64),
             // map the output into u8 space
-            TensorElementType::Bool => {
-                OrtexTensor::u8(e.try_extract_array::<bool>()?.mapv(|x| x as u8).into_shared())
-            }
+            TensorElementType::Bool => OrtexTensor::u8(
+                e.try_extract_array::<bool>()?
+                    .mapv(|x| x as u8)
+                    .into_shared(),
+            ),
             other => return Err(Error::new(format!("Unsupported tensor type {:?}", other))),
         };
 

@@ -2,7 +2,10 @@
 name = "ortex"
 version = "0.3.1"
 authors = []
-edition = "2018"
+edition = "2021"
+# ort rc.15 declares edition 2024 and rust-version 1.92, so that is the floor for this
+# crate too - declared here so cargo says so, instead of failing inside a dependency.
+rust-version = "1.92"
 
 [lib]
 name = "ortex"
@@ -30,19 +33,29 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = [
     "std",
     "ndarray",
     "half",
-    "tracing",
     "load-dynamic",
     "api-24",
 ] }
 ndarray = "0.17.2"
 half = "2.7"
-# ort reports EP registration, device selection and per-node placement through
-# `tracing`; with no subscriber installed all of it is dropped. Turned on per
-# session by trace_path / ORTEX_TRACE, see model::init_tracing.
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Diagnostics, off by default. ort reports EP registration, device selection and per-node
+# placement through `tracing`; a subscriber turns that into a file. Both crates are behind
+# the `trace` feature because on a Nerves target they are pure artifact weight:
+# tracing-subscriber with env-filter pulls in regex-automata, aho-corasick, sharded-slab,
+# matchers and friends - ~10 crates of the ~50 in the graph, extracted for code that only
+# runs when a trace file was asked for.
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
 
 [features]
+default = []
+# `trace_path`/`ORTEX_TRACE` and the VERBOSE ORT log, for diagnosing why an execution
+# provider did or did not claim a graph. Build with ORTEX_FEATURES=trace (or
+# `features: ["trace"]` on `config :ortex, Ortex.Native`); without it both keys are a
+# documented no-op.
+trace = ["dep:tracing", "dep:tracing-subscriber", "ort/tracing"]
+
 # ONNXRuntime Execution providers.
 #
 # rc.13 put every EP struct behind one of these cargo features, so an EP missing here has
