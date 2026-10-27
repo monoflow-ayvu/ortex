@@ -1,6 +1,7 @@
 //! Abstractions for creating an ONNX Runtime Session and Environment which can be safely
 //! passed to and from the BEAM.
 
+use crate::error::OrtexError;
 use crate::tensor::{OrtexTensor, TensorResource};
 use crate::utils::{is_bool_input, map_opt_level};
 use std::convert::TryInto;
@@ -12,7 +13,6 @@ use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
 use ort::session::{Session, SessionInputValue};
 use ort::value::{Outlet, ValueType};
-use ort::Error;
 use rustler::{Atom, Resource, ResourceArc};
 
 /// Holds the model state which include onnxruntime sessions and environment. All
@@ -79,19 +79,19 @@ const RESERVED: &[&str] = &[
     "sessions",
 ];
 
-fn parse_usize(key: &str, value: &str) -> Result<usize, Error> {
+fn parse_usize(key: &str, value: &str) -> Result<usize, OrtexError> {
     value.parse().map_err(|_| {
-        Error::new(format!(
+        OrtexError::invalid_option(format!(
             "{key} must be a non-negative integer, got {value:?}"
         ))
     })
 }
 
-fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
+fn parse_bool(key: &str, value: &str) -> Result<bool, OrtexError> {
     match value {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" => Ok(false),
-        other => Err(Error::new(format!(
+        other => Err(OrtexError::invalid_option(format!(
             "{key} must be a boolean, got {other:?}"
         ))),
     }
@@ -212,10 +212,10 @@ fn with_qnn(
     env: &ort::environment::Environment,
     builder: SessionBuilder,
     qnn_opts: &[(String, String)],
-) -> Result<SessionBuilder, Error> {
+) -> Result<SessionBuilder, OrtexError> {
     let provider_path =
         lookup(qnn_opts, "provider_path").unwrap_or_else(crate::utils::qnn_provider_path);
-    crate::utils::register_qnn_library(&provider_path).map_err(Error::new)?;
+    crate::utils::register_qnn_library(&provider_path)?;
 
     let backend_path =
         lookup(qnn_opts, "backend_path").unwrap_or_else(crate::utils::qnn_backend_path);
@@ -230,7 +230,7 @@ fn with_qnn(
             .devices()
             .map(|d| d.ep().unwrap_or("<unknown>").to_string())
             .collect();
-        return Err(Error::new(format!(
+        return Err(OrtexError::qnn(format!(
             "no QNN device found after registering {}; devices seen: [{}]; backend {}",
             provider_path,
             seen.join(", "),
@@ -257,16 +257,18 @@ fn with_qnn(
 
     let extra = std::env::var("ORTEX_QNN_OPTS").unwrap_or_default();
     for kv in extra.split(',').filter(|s| !s.trim().is_empty()) {
-        let (key, value) = kv
-            .split_once('=')
-            .ok_or_else(|| Error::new(format!("ORTEX_QNN_OPTS entry {kv:?} is not k=v")))?;
+        let (key, value) = kv.split_once('=').ok_or_else(|| {
+            OrtexError::invalid_option(format!("ORTEX_QNN_OPTS entry {kv:?} is not k=v"))
+        })?;
         options.push((
             format!("{ep_name}.{}", key.trim()),
             value.trim().to_string(),
         ));
     }
 
-    Ok(builder.with_devices(devices, Some(&options))?)
+    builder
+        .with_devices(devices, Some(&options))
+        .map_err(OrtexError::qnn)
 }
 
 pub fn init(
@@ -275,7 +277,7 @@ pub fn init(
     use_qnn: bool,
     opt: i32,
     qnn_opts: Vec<(String, String)>,
-) -> Result<OrtexModel, Error> {
+) -> Result<OrtexModel, OrtexError> {
     // `env.*` opts have to be pushed into the real C environment here: os:putenv has
     // written only Erlang's own table since OTP 21, so nothing System.put_env sets
     // reaches getenv() - including the QNN libraries' own getenv("DSP_LIBRARY_PATH").
@@ -293,7 +295,9 @@ pub fn init(
         None => 1,
     };
     if session_count == 0 {
-        return Err(Error::new("sessions must be at least 1, got 0"));
+        return Err(OrtexError::invalid_option(
+            "sessions must be at least 1, got 0",
+        ));
     }
 
     // Everything below builds one session; the loop builds `session_count` of them from
@@ -362,7 +366,7 @@ pub fn init(
     // builder, so the chain has to live in a closure rather than be reused.
     let environment = crate::utils::environment()?;
 
-    let build_session = || -> Result<Session, Error> {
+    let build_session = || -> Result<Session, OrtexError> {
         let mut builder = Session::builder(&environment)?
             .with_optimization_level(map_opt_level(opt))?
             .with_execution_providers(eps.as_slice())?;
@@ -388,7 +392,9 @@ pub fn init(
             builder
         };
 
-        builder.commit_from_file(&model_path)
+        builder
+            .commit_from_file(&model_path)
+            .map_err(OrtexError::from)
     };
 
     let mut sessions = Vec::with_capacity(session_count);
@@ -451,7 +457,7 @@ pub type RunOutput = (ResourceArc<TensorResource>, Vec<usize>, Atom, usize);
 pub fn run(
     model: ResourceArc<OrtexModel>,
     inputs: Vec<ResourceArc<TensorResource>>,
-) -> Result<Vec<RunOutput>, Error> {
+) -> Result<Vec<RunOutput>, OrtexError> {
     let mut session = acquire(&model.sessions, &model.next);
 
     let output_names: Vec<String> = session
@@ -472,7 +478,7 @@ pub fn run(
     {
         let session_inputs = session.inputs();
         if inputs.len() != session_inputs.len() {
-            return Err(Error::new(format!(
+            return Err(OrtexError::invalid_input(format!(
                 "Expected {} input(s), got {}",
                 session_inputs.len(),
                 inputs.len()
@@ -504,13 +510,13 @@ pub fn run(
 
     for output_name in output_names {
         let value = outputs.remove(&output_name).ok_or_else(|| {
-            Error::new(format!(
+            OrtexError::onnxruntime(format!(
                 "Expected {output_name} to be in the outputs, but didn't find it"
             ))
         })?;
 
         if !matches!(value.dtype(), ValueType::Tensor { .. }) {
-            return Err(Error::new(format!(
+            return Err(OrtexError::onnxruntime(format!(
                 "Output {output_name} is not a tensor, got {}",
                 value.dtype()
             )));

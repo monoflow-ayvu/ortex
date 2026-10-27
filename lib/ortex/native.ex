@@ -1,7 +1,9 @@
 defmodule Ortex.Native do
   @moduledoc false
 
-  Ortex.Util.copy_ort_libs()
+  # Copying ORT into priv/native is a Mix task (`mix ortex.copy_ort_libs`, wired into the
+  # `compile` alias), not a side effect of compiling this module: a consumer compiling the
+  # dependency used to trigger it too, before the precompiled NIF was even downloaded.
 
   version = Mix.Project.config()[:version]
 

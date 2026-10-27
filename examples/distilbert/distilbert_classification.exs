@@ -6,7 +6,7 @@ defmodule Inference do
   end
 
   def run() do
-    model = Ortex.load("./models/distilbert-onnx/model.onnx")
+    model = Ortex.load!("./models/distilbert-onnx/model.onnx")
 
     text =
       "the movie had a lot of nuance and interesting artistic choices, would like to see more support in the industry for these types of productions"

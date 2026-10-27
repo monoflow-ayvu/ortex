@@ -7,6 +7,7 @@ defmodule Ortex.MixProject do
       version: "0.3.1",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
+      aliases: aliases(),
       deps: deps(),
 
       # Docs
@@ -18,6 +19,15 @@ defmodule Ortex.MixProject do
         extras: ["README.md"]
       ],
       package: package()
+    ]
+  end
+
+  # `mix ortex.copy_ort_libs` runs first: it copies libonnxruntime from ORT_LIB_LOCATION
+  # into priv/native (a no-op when the variable is unset), which the NIF's $ORIGIN rpath
+  # needs for a source build against a runtime that is not installed system-wide.
+  defp aliases do
+    [
+      compile: ["ortex.copy_ort_libs", "compile"]
     ]
   end
 

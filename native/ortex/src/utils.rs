@@ -2,6 +2,7 @@
 //! [Nx](https://hexdocs.pm/nx) backend.
 
 use crate::constants::*;
+use crate::error::OrtexError;
 use crate::tensor::{OrtexTensor, TensorResource};
 use ndarray::{Array, IxDyn};
 
@@ -17,18 +18,20 @@ use ort::value::{TensorElementType, ValueType};
 fn array_from_binary<T: Copy + Default>(
     bin: &Binary,
     shape: &[usize],
-) -> Result<Array<T, IxDyn>, String> {
+) -> Result<Array<T, IxDyn>, OrtexError> {
     let elements = shape
         .iter()
         .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
-        .ok_or_else(|| format!("Tensor shape {shape:?} is too large to index"))?;
+        .ok_or_else(|| {
+            OrtexError::invalid_input(format!("Tensor shape {shape:?} is too large to index"))
+        })?;
     let expected = elements.saturating_mul(std::mem::size_of::<T>());
 
     if bin.len() != expected {
-        return Err(format!(
+        return Err(OrtexError::invalid_input(format!(
             "Binary length mismatch for shape {shape:?}: expected {expected} bytes, got {}",
             bin.len()
-        ));
+        )));
     }
 
     let mut data = vec![T::default(); elements];
@@ -38,7 +41,7 @@ fn array_from_binary<T: Copy + Default>(
         }
     }
 
-    Array::from_shape_vec(IxDyn(shape), data).map_err(|e| e.to_string())
+    Array::from_shape_vec(IxDyn(shape), data).map_err(OrtexError::invalid_input)
 }
 
 /// Given a Binary term, shape, and dtype from the BEAM, constructs an OrtexTensor and
@@ -59,7 +62,7 @@ pub fn from_binary(
     shape: Vec<usize>,
     dtype_str: String,
     dtype_bits: usize,
-) -> Result<ResourceArc<TensorResource>, String> {
+) -> Result<ResourceArc<TensorResource>, OrtexError> {
     // `typ` is the element type, `ort_tensor_kind` the matching OrtexTensor variant
     macro_rules! tensor {
         ($typ:ty, $ort_tensor_kind:ident) => {
@@ -82,9 +85,9 @@ pub fn from_binary(
         ("u", 16) => tensor!(u16, u16),
         ("u", 32) => tensor!(u32, u32),
         ("u", 64) => tensor!(u64, u64),
-        _ => Err(format!(
+        _ => Err(OrtexError::invalid_input(format!(
             "Unsupported dtype {dtype_str} with {dtype_bits} bits"
-        )),
+        ))),
     }
 }
 
@@ -111,7 +114,7 @@ pub fn to_binary<'a>(
 }
 
 fn nif_error<E: std::fmt::Display>(e: E) -> rustler::Error {
-    rustler::Error::Term(Box::new(e.to_string()))
+    OrtexError::onnxruntime(e).into()
 }
 
 fn provider_name(env: Env, ep: &Atom) -> String {
@@ -133,104 +136,116 @@ pub fn wants_qnn(env: Env, eps: &[Atom]) -> bool {
 /// Since ort rc.13 the execution provider structs sit behind cargo features, so an EP
 /// that was not compiled in has no type at all. Returning an error naming the feature is
 /// what stops `Ortex.load(path, [:cuda])` from quietly running on the CPU instead.
-pub fn map_eps(env: Env, eps: Vec<Atom>) -> Result<Vec<ExecutionProviderDispatch>, String> {
-    eps.iter()
-        .map(|e| provider_name(env, e))
-        .filter(|name| name != QNN)
-        .map(|name| match name.as_str() {
-            CPU => Ok(ep::CPU::default().build()),
-            CUDA => cuda_ep(),
-            TENSORRT => tensorrt_ep(),
-            ACL => acl_ep(),
-            ONEDNN | DNNL => onednn_ep(),
-            COREML => coreml_ep(),
-            DIRECTML => directml_ep(),
-            ROCM => rocm_ep(),
-            other => Err(format!(
-                "Unknown execution provider: {}. Expected one of: {}",
-                other,
-                [CPU, CUDA, TENSORRT, ACL, ONEDNN, DNNL, COREML, DIRECTML, ROCM, QNN].join(", ")
-            )),
+pub fn map_eps(env: Env, eps: Vec<Atom>) -> Result<Vec<ExecutionProviderDispatch>, OrtexError> {
+    eps.into_iter()
+        .filter(|e| provider_name(env, e) != QNN)
+        .map(|provider| {
+            let name = provider_name(env, &provider);
+            match name.as_str() {
+                CPU => Ok(ep::CPU::default().build()),
+                CUDA => cuda_ep(provider),
+                TENSORRT => tensorrt_ep(provider),
+                ACL => acl_ep(provider),
+                ONEDNN | DNNL => onednn_ep(provider),
+                COREML => coreml_ep(provider),
+                DIRECTML => directml_ep(provider),
+                ROCM => rocm_ep(provider),
+                other => Err(OrtexError::execution_provider(
+                    provider,
+                    format!(
+                        "Unknown execution provider: {}. Expected one of: {}",
+                        other,
+                        [CPU, CUDA, TENSORRT, ACL, ONEDNN, DNNL, COREML, DIRECTML, ROCM, QNN]
+                            .join(", ")
+                    ),
+                )),
+            }
         })
         .collect()
 }
 
-fn ep_not_compiled(name: &str, feature: &str) -> String {
-    format!(
-        "{name} execution provider is not compiled into this NIF. Rebuild with the \
-         `{feature}` cargo feature: ORTEX_FEATURES={feature} mix compile (or \
-         `features: [\"{feature}\"]` for `config :ortex, Ortex.Native`)"
+/// The one error whose cause and fix are both known: the provider exists in the request,
+/// not in this build. `provider` carries the atom the caller asked for, so the BEAM can
+/// match on it instead of parsing the message.
+fn ep_not_compiled(provider: Atom, name: &str, feature: &str) -> OrtexError {
+    OrtexError::execution_provider(
+        provider,
+        format!(
+            "{name} execution provider is not compiled into this NIF. Rebuild with the \
+             `{feature}` cargo feature: ORTEX_FEATURES={feature} mix compile (or \
+             `features: [\"{feature}\"]` for `config :ortex, Ortex.Native`)"
+        ),
     )
 }
 
 #[cfg(feature = "cuda")]
-fn cuda_ep() -> Result<ExecutionProviderDispatch, String> {
+fn cuda_ep(_provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
     Ok(ep::CUDA::default().build())
 }
 
 #[cfg(not(feature = "cuda"))]
-fn cuda_ep() -> Result<ExecutionProviderDispatch, String> {
-    Err(ep_not_compiled("CUDA", "cuda"))
+fn cuda_ep(provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
+    Err(ep_not_compiled(provider, "CUDA", "cuda"))
 }
 
 #[cfg(feature = "tensorrt")]
-fn tensorrt_ep() -> Result<ExecutionProviderDispatch, String> {
+fn tensorrt_ep(_provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
     Ok(ep::TensorRT::default().build())
 }
 
 #[cfg(not(feature = "tensorrt"))]
-fn tensorrt_ep() -> Result<ExecutionProviderDispatch, String> {
-    Err(ep_not_compiled("TensorRT", "tensorrt"))
+fn tensorrt_ep(provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
+    Err(ep_not_compiled(provider, "TensorRT", "tensorrt"))
 }
 
 #[cfg(feature = "acl")]
-fn acl_ep() -> Result<ExecutionProviderDispatch, String> {
+fn acl_ep(_provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
     Ok(ep::ACL::default().build())
 }
 
 #[cfg(not(feature = "acl"))]
-fn acl_ep() -> Result<ExecutionProviderDispatch, String> {
-    Err(ep_not_compiled("ACL", "acl"))
+fn acl_ep(provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
+    Err(ep_not_compiled(provider, "ACL", "acl"))
 }
 
 #[cfg(feature = "onednn")]
-fn onednn_ep() -> Result<ExecutionProviderDispatch, String> {
+fn onednn_ep(_provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
     Ok(ep::OneDNN::default().build())
 }
 
 #[cfg(not(feature = "onednn"))]
-fn onednn_ep() -> Result<ExecutionProviderDispatch, String> {
-    Err(ep_not_compiled("oneDNN", "onednn"))
+fn onednn_ep(provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
+    Err(ep_not_compiled(provider, "oneDNN", "onednn"))
 }
 
 #[cfg(feature = "coreml")]
-fn coreml_ep() -> Result<ExecutionProviderDispatch, String> {
+fn coreml_ep(_provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
     Ok(ep::CoreML::default().build())
 }
 
 #[cfg(not(feature = "coreml"))]
-fn coreml_ep() -> Result<ExecutionProviderDispatch, String> {
-    Err(ep_not_compiled("CoreML", "coreml"))
+fn coreml_ep(provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
+    Err(ep_not_compiled(provider, "CoreML", "coreml"))
 }
 
 #[cfg(feature = "directml")]
-fn directml_ep() -> Result<ExecutionProviderDispatch, String> {
+fn directml_ep(_provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
     Ok(ep::DirectML::default().build())
 }
 
 #[cfg(not(feature = "directml"))]
-fn directml_ep() -> Result<ExecutionProviderDispatch, String> {
-    Err(ep_not_compiled("DirectML", "directml"))
+fn directml_ep(provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
+    Err(ep_not_compiled(provider, "DirectML", "directml"))
 }
 
 #[cfg(feature = "rocm")]
-fn rocm_ep() -> Result<ExecutionProviderDispatch, String> {
+fn rocm_ep(_provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
     Ok(ep::ROCm::default().build())
 }
 
 #[cfg(not(feature = "rocm"))]
-fn rocm_ep() -> Result<ExecutionProviderDispatch, String> {
-    Err(ep_not_compiled("ROCm", "rocm"))
+fn rocm_ep(provider: Atom) -> Result<ExecutionProviderDispatch, OrtexError> {
+    Err(ep_not_compiled(provider, "ROCm", "rocm"))
 }
 
 /// The process-wide ONNX Runtime environment, created on first use.
@@ -266,7 +281,7 @@ pub fn environment() -> Result<ort::environment::Environment, ort::Error> {
 /// Only a *successful* registration is cached. A failure is not: on Nerves the library
 /// can be mounted after the first `Ortex.load`, and caching that first error would keep
 /// every later attempt dead until the OS process restarted.
-pub fn register_qnn_library(provider: &str) -> Result<(), String> {
+pub fn register_qnn_library(provider: &str) -> Result<(), OrtexError> {
     static REGISTERED: std::sync::LazyLock<std::sync::Mutex<Option<String>>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
@@ -285,14 +300,20 @@ pub fn register_qnn_library(provider: &str) -> Result<(), String> {
     }
 
     if !std::path::Path::new(provider).exists() {
-        return Err(format!("QNN plugin EP library not found at {provider}"));
+        return Err(OrtexError::qnn(format!(
+            "QNN plugin EP library not found at {provider}"
+        )));
     }
 
-    let env = environment().map_err(|e| format!("could not get ONNX Runtime environment: {e}"))?;
+    let env = environment()
+        .map_err(|e| OrtexError::qnn(format!("could not get ONNX Runtime environment: {e}")))?;
     // rc.15 removed `unregister`, and the registration lives with the environment, which
     // is kept for the lifetime of the process.
-    env.register_ep_library("QNN", provider)
-        .map_err(|e| format!("failed to register QNN plugin EP from {provider}: {e}"))?;
+    env.register_ep_library("QNN", provider).map_err(|e| {
+        OrtexError::qnn(format!(
+            "failed to register QNN plugin EP from {provider}: {e}"
+        ))
+    })?;
 
     *registered = Some(provider.to_string());
     Ok(())

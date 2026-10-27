@@ -10,6 +10,7 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::constants::ortex_atoms;
+use crate::error::OrtexError;
 
 /// Tensor storage passed back and forth with the BEAM.
 ///
@@ -174,7 +175,7 @@ impl OrtexTensor {
     /// layout, and sharing is a refcount - so a reshape of a 600 KB output is a couple of
     /// pointer writes rather than a memcpy. An ORT-owned value has no ndarray to share,
     /// so it is materialized first.
-    pub fn reshape(&self, shape: Vec<usize>) -> rustler::NifResult<Self> {
+    pub fn reshape(&self, shape: Vec<usize>) -> Result<Self, OrtexError> {
         let shape: IxDyn = IxDyn(&shape);
         let tensor = self.to_shared().map_err(nif_term)?;
 
@@ -194,10 +195,10 @@ impl OrtexTensor {
             OrtexTensor::bool(y) => OrtexTensor::bool(reshape_arc(&y, shape)?),
             // `to_shared` materializes this variant, so it cannot come back here.
             OrtexTensor::ort(value) => {
-                return Err(rustler::Error::Term(Box::new(format!(
+                return Err(OrtexError::invalid_input(format!(
                     "could not materialize output tensor: {}",
                     value.dtype()
-                ))))
+                )))
             }
         })
     }
@@ -246,20 +247,18 @@ impl OrtexTensor {
         start_indicies: Vec<isize>,
         lengths: Vec<isize>,
         strides: Vec<isize>,
-    ) -> rustler::NifResult<Self> {
+    ) -> Result<Self, OrtexError> {
         // ndarray panics on a rank mismatch or a zero step, and these come
         // straight from the BEAM.
         let rank = self.shape().len();
         if start_indicies.len() != rank || lengths.len() != rank || strides.len() != rank {
-            return Err(rustler::Error::Term(Box::new(format!(
+            return Err(OrtexError::invalid_input(format!(
                 "Slice arguments must match tensor rank of {}",
                 rank
-            ))));
+            )));
         }
         if strides.contains(&0) {
-            return Err(rustler::Error::Term(Box::new(
-                "Slice stride must be non-zero".to_string(),
-            )));
+            return Err(OrtexError::invalid_input("Slice stride must be non-zero"));
         }
 
         let mut slice_specs: Vec<(isize, Option<isize>, isize)> = vec![];
@@ -289,10 +288,10 @@ impl OrtexTensor {
             OrtexTensor::f64(y) => OrtexTensor::f64(slice_arc(&y, &slice_specs)),
             OrtexTensor::bool(y) => OrtexTensor::bool(slice_arc(&y, &slice_specs)),
             OrtexTensor::ort(value) => {
-                return Err(rustler::Error::Term(Box::new(format!(
+                return Err(OrtexError::invalid_input(format!(
                     "could not materialize output tensor: {}",
                     value.dtype()
-                ))))
+                )))
             }
         })
     }
@@ -301,11 +300,11 @@ impl OrtexTensor {
     ///
     /// Borrowed rather than consuming: callers keep the input they were given, and the new
     /// buffer has to be written element by element anyway.
-    pub fn to_bool(&self) -> Result<OrtexTensor, Error> {
+    pub fn to_bool(&self) -> Result<OrtexTensor, OrtexError> {
         match self {
             OrtexTensor::u8(y) => {
                 if y.iter().any(|x| *x > 1) {
-                    return Err(Error::new(
+                    return Err(OrtexError::invalid_input(
                         "Tried to convert a u8 tensor to bool, but not every element is 0 or 1",
                     ));
                 }
@@ -313,7 +312,7 @@ impl OrtexTensor {
             }
             // A model output feeding a bool input: materialize, then rewrite.
             OrtexTensor::ort(value) => OrtexTensor::try_from(value)?.to_bool(),
-            t => Err(Error::new(format!(
+            t => Err(OrtexError::invalid_input(format!(
                 "Can't convert this type {:?} to bool",
                 t.dtype()
             ))),
@@ -413,18 +412,18 @@ fn value_bytes(value: &Value) -> Result<&[u8], Error> {
     })
 }
 
-fn nif_term<E: std::fmt::Display>(e: E) -> rustler::Error {
-    rustler::Error::Term(Box::new(e.to_string()))
+fn nif_term<E: std::fmt::Display>(e: E) -> OrtexError {
+    OrtexError::onnxruntime(e)
 }
 
 fn reshape_arc<T: Clone>(
     array: &ArcArray<T, IxDyn>,
     shape: IxDyn,
-) -> rustler::NifResult<ArcArray<T, IxDyn>> {
+) -> Result<ArcArray<T, IxDyn>, OrtexError> {
     array
         .clone()
         .into_shape_with_order(shape)
-        .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))
+        .map_err(OrtexError::invalid_input)
 }
 
 fn slice_array<'a, T, D>(
@@ -574,7 +573,9 @@ macro_rules! concatenate {
             .filter_map(|tensor| filter(tensor))
             .collect();
         if views.len() != expected {
-            return Err(Error::new("Concatenate called with mixed tensor types"));
+            return Err(OrtexError::invalid_input(
+                "Concatenate called with mixed tensor types",
+            ));
         }
 
         let joined =
@@ -592,7 +593,7 @@ pub fn concatenate(
     tensors: Vec<ResourceArc<TensorResource>>,
     dtype: (&str, usize),
     axis: usize,
-) -> Result<OrtexTensor, Error> {
+) -> Result<OrtexTensor, OrtexError> {
     // An ORT-owned output has no ndarray for the macro below to view; materialize it once
     // for this concatenation. Array variants are shared, not copied.
     let tensors: Vec<ResourceArc<TensorResource>> = tensors
@@ -616,7 +617,7 @@ pub fn concatenate(
         ("bf", 16) => concatenate!(tensors, axis, half::bf16, bf16),
         ("f", 32) => concatenate!(tensors, axis, f32, f32),
         ("f", 64) => concatenate!(tensors, axis, f64, f64),
-        (kind, bits) => Err(Error::new(format!(
+        (kind, bits) => Err(OrtexError::invalid_input(format!(
             "Can't concatenate {}{} tensors",
             kind, bits
         ))),

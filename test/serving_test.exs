@@ -2,7 +2,7 @@ defmodule Ortex.TestServing do
   use ExUnit.Case
 
   setup_all do
-    %{model: Ortex.load("./models/tinymodel.onnx")}
+    %{model: Ortex.load!("./models/tinymodel.onnx")}
   end
 
   defp batch(rows) do

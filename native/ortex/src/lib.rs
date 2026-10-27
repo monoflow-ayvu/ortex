@@ -5,6 +5,7 @@
 //! directly.
 
 mod constants;
+mod error;
 mod model;
 mod tensor;
 mod utils;
@@ -15,10 +16,6 @@ use tensor::TensorResource;
 use rustler::types::Binary;
 use rustler::{Atom, Env, NifResult, ResourceArc, Term};
 
-fn nif_error<E: std::fmt::Display>(e: E) -> rustler::Error {
-    rustler::Error::Term(Box::new(e.to_string()))
-}
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn init(
     env: Env,
@@ -28,8 +25,8 @@ fn init(
     qnn_opts: Vec<(String, String)>,
 ) -> NifResult<ResourceArc<model::OrtexModel>> {
     let use_qnn = utils::wants_qnn(env, &eps);
-    let eps = utils::map_eps(env, eps).map_err(nif_error)?;
-    let model = model::init(model_path, eps, use_qnn, opt, qnn_opts).map_err(nif_error)?;
+    let eps = utils::map_eps(env, eps)?;
+    let model = model::init(model_path, eps, use_qnn, opt, qnn_opts)?;
     Ok(ResourceArc::new(model))
 }
 
@@ -48,19 +45,19 @@ fn run(
     model: ResourceArc<model::OrtexModel>,
     inputs: Vec<ResourceArc<TensorResource>>,
 ) -> NifResult<Vec<RunOutput>> {
-    model::run(model, inputs).map_err(nif_error)
+    Ok(model::run(model, inputs)?)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn from_binary(bin: Binary, shape: Term, dtype: Term) -> NifResult<ResourceArc<TensorResource>> {
     let shape: Vec<usize> = rustler::types::tuple::get_tuple(shape)?
         .iter()
-        .map(|x| -> NifResult<usize> { Ok(x.decode::<usize>())? })
+        .map(|x| -> NifResult<usize> { x.decode::<usize>() })
         .collect::<NifResult<Vec<usize>>>()?;
     let (dtype_t, dtype_bits): (Term, usize) = dtype.decode()?;
     let dtype_str = dtype_t.atom_to_string()?;
 
-    utils::from_binary(bin, shape, dtype_str, dtype_bits).map_err(nif_error)
+    Ok(utils::from_binary(bin, shape, dtype_str, dtype_bits)?)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -112,8 +109,7 @@ pub fn concatenate(
 ) -> NifResult<ResourceArc<TensorResource>> {
     let (dtype_t, dtype_bits): (Term, usize) = dtype.decode()?;
     let dtype_str = dtype_t.atom_to_string()?;
-    let concatted =
-        tensor::concatenate(tensors, (&dtype_str, dtype_bits), axis as usize).map_err(nif_error)?;
+    let concatted = tensor::concatenate(tensors, (&dtype_str, dtype_bits), axis as usize)?;
     Ok(TensorResource::new(concatted))
 }
 

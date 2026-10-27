@@ -1,4 +1,4 @@
-model = Ortex.load("./models/stability-lm-3b/stability-lm-tuned-3b.onnx")
+model = Ortex.load!("./models/stability-lm-3b/stability-lm-tuned-3b.onnx")
 
 prompt = "<|SYSTEM|># StableLM Tuned (Alpha version)
 - StableLM is a helpful and harmless open-source AI language model developed by StabilityAI.
