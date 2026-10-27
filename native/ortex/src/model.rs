@@ -442,12 +442,16 @@ fn describe(outlets: &[Outlet]) -> IoSpec {
         .collect()
 }
 
+/// One output of `run`: the tensor plus the metadata the BEAM side needs to build an
+/// `Nx.Tensor` around it (shape, dtype atom, dtype bits).
+pub type RunOutput = (ResourceArc<OrtexTensor>, Vec<usize>, Atom, usize);
+
 /// Runs the model with the given inputs. Returns a vector of tensors. Use `model::show`
 /// to see what the model expects for input and output shapes.
 pub fn run(
     model: ResourceArc<OrtexModel>,
     inputs: Vec<ResourceArc<OrtexTensor>>,
-) -> Result<Vec<(ResourceArc<OrtexTensor>, Vec<usize>, Atom, usize)>, Error> {
+) -> Result<Vec<RunOutput>, Error> {
     let mut session = acquire(&model.sessions, &model.next);
 
     let output_names: Vec<String> = session

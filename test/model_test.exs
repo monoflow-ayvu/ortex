@@ -13,6 +13,11 @@ defmodule Ortex.TestModel do
     {x, y}
   end
 
+  defp close?(left, right) do
+    Nx.all_close(Nx.backend_transfer(left), Nx.backend_transfer(right), atol: 1.0e-5)
+    |> Nx.to_number() == 1
+  end
+
   defp run!(model, tensor) do
     model
     |> Ortex.run(tensor)
@@ -42,6 +47,11 @@ defmodule Ortex.TestModel do
   # The graph is row-wise, so batching must not mix rows: row i of a batched run equals
   # the result of running row i on its own. This is the value-level check that the
   # shape-only assertions above cannot make.
+  #
+  # Compared with a tolerance on purpose: ONNX Runtime picks a different GEMM kernel and
+  # tiling for a batch-2 matrix than for a batch-1 one, so the last bits differ on some
+  # builds (macOS + ORT 1.31 shows ~6e-8 relative difference). Row identity is the
+  # contract; bit-identical arithmetic across shapes is not.
   test "each row of a batch matches the same row run alone", %{model: model} do
     {x1, y1} = inputs(1)
     {x2, y2} = inputs(2)
@@ -51,9 +61,9 @@ defmodule Ortex.TestModel do
     [b1, b2, _] = run!(model, {Nx.concatenate([x1, x2]), Nx.concatenate([y1, y2])})
 
     assert Nx.shape(b1) == {2, 10}
-    assert b1[0] == alone1[0]
-    assert b1[1] == alone2[0]
-    assert b2[1] == alone2_b[0]
+    assert close?(b1[0], alone1[0])
+    assert close?(b1[1], alone2[0])
+    assert close?(b2[1], alone2_b[0])
   end
 
   test "sessions: N loads a pool and concurrent runs stay correct" do

@@ -84,6 +84,17 @@ The NIF asks the runtime for ONNX Runtime API version 24 (`api-24` in
 `native/ortex/Cargo.toml`), which ORT 1.24.x and newer provide, so 1.24 is the minimum
 supported runtime.
 
+CI runs the suite against both ends of that range - 1.24.4 (minimum) and the newest
+release (1.31.0 at the time of writing) - because `load-dynamic` makes the runtime a
+deployment choice, not a build input: the same NIF dlopen()s whatever ORT the target
+has. A regression that only shows on one of them is exactly what a single-version matrix
+would hide.
+
+Language support is tested the same way: Elixir 1.17.3 / OTP 27 (the floor declared in
+`mix.exs`) and 1.20.4 / OTP 29 (current), plus the Elixir 1.18 / OTP 28 pair that
+`devenv.nix` provides, so the development shell is a tested configuration rather than a
+guess.
+
 ## Testing
 
 `mix test` runs the suite against `models/tinymodel.onnx`, the small model committed to

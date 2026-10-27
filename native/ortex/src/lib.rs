@@ -9,7 +9,7 @@ mod model;
 mod tensor;
 mod utils;
 
-use model::IoSpec;
+use model::{IoSpec, RunOutput};
 use tensor::OrtexTensor;
 
 use rustler::types::Binary;
@@ -47,7 +47,7 @@ fn show_session(model: ResourceArc<model::OrtexModel>) -> NifResult<(IoSpec, IoS
 fn run(
     model: ResourceArc<model::OrtexModel>,
     inputs: Vec<ResourceArc<OrtexTensor>>,
-) -> NifResult<Vec<(ResourceArc<OrtexTensor>, Vec<usize>, Atom, usize)>> {
+) -> NifResult<Vec<RunOutput>> {
     model::run(model, inputs).map_err(nif_error)
 }
 
