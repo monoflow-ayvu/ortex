@@ -4,7 +4,7 @@ defmodule Ortex.MixProject do
   def project do
     [
       app: :ortex,
-      version: "0.3.1",
+      version: "0.4.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
