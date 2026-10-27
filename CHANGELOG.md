@@ -32,6 +32,9 @@ release workflow then builds and tests the precompiled NIFs and publishes them.
   for source builds against a runtime that is not installed system-wide.
 - `sessions: N`: a pool of N ONNX Runtime sessions over the same graph, which is the only way
   to get concurrent inference from one model (`Session::run` needs `&mut self`).
+- `ORTEX_INTRA_THREADS`, `ORTEX_INTER_THREADS`, `ORTEX_SPIN_CONTROL` and
+  `ORTEX_GLOBAL_THREAD_POOL`: size, spin control and opt-out for the process-wide ONNX
+  Runtime thread pool.
 - `trace` cargo feature: the diagnostics path (`trace_path`/`ORTEX_TRACE`, VERBOSE ORT log)
   compiled on demand instead of always.
 - A test suite for the serving and error paths (`models/tinymodel.onnx`), replacing the
@@ -42,6 +45,20 @@ release workflow then builds and tests the precompiled NIFs and publishes them.
 
 ### Changed
 
+- One ONNX Runtime *global* thread pool per process instead of one pool per session. Before,
+  every session built its own: `intra_op` one thread per core plus `inter_op`, so three
+  models on a 6-core board meant ~18 threads outside the BEAM before any inference ran and
+  `sessions:` multiplied them again. Now the pool is created once with the environment and
+  shared by every session, so the thread count is a constant: measured on an 8-thread board,
+  6 models x 4 sessions went from 72 ONNX Runtime threads to 6, with 16 concurrent callers
+  going from 10.7k-16.1k to 77.3k-80.6k inferences/s and p50 from 651-888us to 162-171us;
+  one model on one session is unchanged. A model loaded with any `threads:` option - and any
+  `:qnn` load, whose `intra: 1`/spinning-off defaults are a measurement - keeps its own pool,
+  because ONNX Runtime ignores per-session thread options while the session shares the global
+  one. Size it with `ORTEX_INTRA_THREADS`/`ORTEX_INTER_THREADS`, park it with
+  `ORTEX_SPIN_CONTROL=0`, or get the old shape back with `ORTEX_GLOBAL_THREAD_POOL=0`.
+- `sessions: N` is now what its documentation always said: N copies of the graph for
+  concurrency, not N sets of thread pools.
 - Inference runs on the dirty CPU pool instead of the 10-thread dirty I/O pool.
 - Inspecting a model no longer takes the session lock, so it cannot block behind a running
   inference.

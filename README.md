@@ -68,7 +68,8 @@ round-robins inferences over them:
 model = Ortex.load!("./models/resnet50.onnx", [:cpu], 3, sessions: 4)
 ```
 
-Each pooled session loads the graph and its own thread pools, so N is bounded by memory.
+Each pooled session loads its own copy of the graph - its thread pools are shared with the
+rest of the process by default, see below - so N is bounded by memory.
 
 ### Cancellation
 
@@ -89,33 +90,68 @@ the flag, and one handle used by several runs terminates all of them.
 
 ### Thread pools and memory
 
-Every `Ortex.load/4` creates its own ONNX Runtime session, and a session creates its own
-thread pools: `intra_op` defaults to one thread per core, `inter_op` to another one. Those
-threads are not BEAM processes - they do not show up in `:erlang.system_info(:process_count)`
-and the scheduler does not know about them - but they compete for the same cores. Loading
-three models on a 6-core board means roughly 18 ONNX Runtime threads before any inference
-runs, and `sessions: N` multiplies them again because each pooled session builds its own
-pools.
+ONNX Runtime's threads are not BEAM processes: they do not show up in
+`:erlang.system_info(:process_count)` and the scheduler does not know about them, but they
+compete for the same cores.
+
+By default Ortex asks the runtime for its *global* thread pool: one pool per process,
+created with the environment and shared by every session built from it. Its size is fixed
+when it is created - `intra_op` defaults to one thread per core, `inter_op` to one - and
+neither the number of models nor `sessions:` multiplies it:
+
+| models x sessions | one pool per session | global pool |
+|---|---|---|
+| 1 x 1 | 3 threads | 6 |
+| 3 x 2 | 18 | 6 |
+| 6 x 4 | 72 | 6 |
+
+(Measured on an 8-thread x86 board with `models/tinymodel.onnx`; the left column is
+`ORTEX_GLOBAL_THREAD_POOL=0`, i.e. what this library did before. The pool has a floor: a
+process with a single small model pays its fixed size too.)
+
+That is the default because the per-session shape scales with the deployment instead of the
+work: three models on a 6-core board used to mean roughly 18 ONNX Runtime threads before any
+inference ran, and `sessions: N` multiplied them again because each pooled session built its
+own pools. The pool is shared by runs, not owned by them, so concurrent inference over one
+model or six does not need one pool each.
+
+The same measurement, 6 models x 4 sessions with 16 callers: 10.7k-16.1k inferences/s and a
+651-888us p50 with per-session pools, 77.3k-80.6k/s and 162-171us p50 with the shared pool.
+With a single model on one session the two are within noise of each other (22.1k-28.8k/s,
+p50 27-45us), so the shared pool is not a tax on the serial case, and 3 models x 2 sessions
+gains about 6% throughput.
+
+Sizing and opting out, all read once per process at the first `Ortex.load/4` (the
+environment, and with it the pool, is built then and cannot change afterwards):
+
+  * `ORTEX_INTRA_THREADS` / `ORTEX_INTER_THREADS` - the pool's size. Unset keeps ONNX
+    Runtime's defaults (one intra-op thread per core, one inter-op).
+  * `ORTEX_SPIN_CONTROL=0` - park idle pool threads instead of letting them spin.
+  * `ORTEX_GLOBAL_THREAD_POOL=0` - back to one pool per session.
+  * `threads: [intra: n, ...]` in `Ortex.load/4` - that model gets its own pool instead of
+    the shared one, which is the only way its values can take effect: ONNX Runtime ignores
+    a session's thread options once the session is using the global pool. A QNN load does
+    the same unconditionally, because its defaults (`intra: 1` with spinning off) are a
+    measurement rather than a preference - idle spinning workers heated a Dragon Q6A until
+    the package throttled the NPU doing the work, 24 -> 20.6 fps - and the shared pool would
+    override exactly those two values.
 
 So:
 
-  * one model per task, and `threads: [intra: n]` set deliberately when the default (all
-    cores) is not what you want;
-  * on an accelerator EP, `threads: [intra: 1, intra_op_spinning: false]` beats the default:
-    the measured case in `native/ortex/src/model.rs` is 24 -> 20.6 fps on a Dragon Q6A, where
-    idle spinning workers heated the package until it throttled the NPU doing the work. This
-    is already the default when `:qnn` is requested;
-  * `sessions: N` is for concurrency, not throughput per inference: size it to the cores you
-    can afford, not to the number of callers.
+  * leave the thread options alone to share the pool, and size it with `ORTEX_INTRA_THREADS`
+    when all cores is not what you want on a board that also runs the rest of the VM;
+  * `sessions: N` is for concurrency, not throughput per inference: size it to the graph
+    memory you can afford, since each pooled session keeps a copy of the graph - not a set of
+    thread pools;
+  * `threads: [intra: n]` on one model is still there for a model that needs its own
+    schedule; accept that the per-model arithmetic above comes back with it;
+  * on an accelerator EP, `threads: [intra: 1, intra_op_spinning: false]` beats the default,
+    and is already what a `:qnn` load gets.
 
 Tensor data lives on the Rust heap, so the same is true of memory: `:erlang.memory/0` does
 not see it and the collector feels no pressure from it. `Ortex.memory/0` reports it, and
 `Ortex.Memory.poll/0` emits it as `[:ortex, :memory]` for whatever poller your app already
 runs.
-
-ONNX Runtime 1.24+ (the `ort` crate we use included) can build one global thread pool shared
-by every session instead; that would change the defaults above and is a deliberate follow-up,
-not something to switch on silently.
 
 ## Installation
 
